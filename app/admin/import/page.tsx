@@ -37,6 +37,21 @@ import * as PapaModule from 'papaparse'
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const Papa: typeof import('papaparse') = (PapaModule as any).default ?? PapaModule
 
+// Mirror of server-side detectHeaderRowIndex — finds the real column header row
+// (CSV files often have title/intro rows before the actual headers)
+const HEADER_KEYWORDS = [
+  'shortcut dimension 1 code', 'posting date', 'salesperson code',
+  'bill-to name', 'sale person name', 'amount',
+]
+function findHeaderRowIndex(rows: string[][]): number {
+  for (let i = 0; i < Math.min(rows.length, 15); i++) {
+    const rowText = rows[i].map(c => String(c ?? '').toLowerCase().trim()).join(' ')
+    const matches = HEADER_KEYWORDS.filter(kw => rowText.includes(kw))
+    if (matches.length >= 2) return i
+  }
+  return 0
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type Batch = {
@@ -153,7 +168,9 @@ export default function AdminImportPage() {
                   ))
                   return
                 }
-                resolve({ headers: all[0] ?? [], rows: all.slice(1) })
+                // Find real header row (file may have title/intro rows before headers)
+                const headerIdx = findHeaderRowIndex(all)
+                resolve({ headers: all[headerIdx] ?? [], rows: all.slice(headerIdx + 1) })
               },
               error: (err) => reject(new Error(`PapaParse error: ${err.message ?? String(err)}`)),
             })
