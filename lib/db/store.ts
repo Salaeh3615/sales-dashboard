@@ -66,13 +66,10 @@ const B = {
   meta:      'clt-db/meta.json',
 } as const
 
-// Private blob fetch — adds Authorization header for private-access stores
+// Fetch a blob URL (public store — no auth header needed)
 async function blobFetch(url: string): Promise<Response | null> {
   try {
-    const token = process.env.BLOB_READ_WRITE_TOKEN ?? ''
-    const res   = await fetch(url, {
-      headers: { Authorization: `Bearer ${token}` },
-    })
+    const res = await fetch(url)
     return res.ok ? res : null
   } catch { return null }
 }
@@ -92,7 +89,7 @@ async function blobReadString(pathname: string): Promise<string | null> {
 async function blobWriteString(pathname: string, content: string): Promise<void> {
   const { put } = await import('@vercel/blob')
   await put(pathname, content, {
-    access: 'private', addRandomSuffix: false, allowOverwrite: true,
+    access: 'public', addRandomSuffix: false, allowOverwrite: true,
     contentType: 'text/plain; charset=utf-8',
   })
 }
@@ -102,7 +99,7 @@ async function blobWriteNdjson(pathname: string, records: SalesRecord[]): Promis
   const { put } = await import('@vercel/blob')
   const content = records.map(r => JSON.stringify(r)).join('\n') + '\n'
   await put(pathname, content, {
-    access: 'private', addRandomSuffix: false, allowOverwrite: true,
+    access: 'public', addRandomSuffix: false, allowOverwrite: true,
     contentType: 'text/plain; charset=utf-8',
   })
 }
