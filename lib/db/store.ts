@@ -71,9 +71,18 @@ const K = {
   batch: (id: string) => `clt:batch:${id}`,
 } as const
 
+/**
+ * kvGet — always returns a JSON string (or null).
+ * @vercel/kv auto-deserializes stored values, so we may receive an object
+ * instead of the raw string.  Re-stringify if needed so callers can always
+ * do JSON.parse() safely.
+ */
 async function kvGet(key: string): Promise<string | null> {
   const { kv } = await import('@vercel/kv')
-  return kv.get<string>(key)
+  const val = await kv.get(key)
+  if (val === null || val === undefined) return null
+  if (typeof val === 'string') return val
+  return JSON.stringify(val)   // already deserialized → re-stringify
 }
 
 async function kvSet(key: string, value: string): Promise<void> {
