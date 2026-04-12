@@ -124,44 +124,66 @@ export default function AdminImportPage() {
     try {
       const fileArr = Array.from(files)
 
-      // ── Blob mode (Vercel production): upload directly to Blob CDN ──────────
+      // ── Blob mode (Vercel production): parse CSV in browser, send chunks ────
       if (blobMode) {
-        const { upload: blobUpload } = await import('@vercel/blob/client')
+        const Papa = (await import('papaparse')).default
+        const CHUNK_ROWS = 2000   // ~1-2 MB per request — safely under 4.5 MB limit
 
         let totalInserted = 0
         let totalSkipped  = 0
         const batchSummaries: { filename: string; inserted: number; skipped: number }[] = []
 
-        for (let i = 0; i < fileArr.length; i++) {
-          const file = fileArr[i]
-          setUploadProgress(`กำลัง upload ไฟล์ ${i + 1}/${fileArr.length}: ${file.name}…`)
+        for (let fi = 0; fi < fileArr.length; fi++) {
+          const file = fileArr[fi]
 
-          // 1. Upload file directly to Vercel Blob
-          const blob = await blobUpload(
-            `clt-uploads/${Date.now()}-${file.name}`,
-            file,
-            { access: 'public', handleUploadUrl: '/api/import/upload-url' },
-          )
+          // 1. Parse CSV entirely in browser (runs locally, no upload needed)
+          setUploadProgress(`กำลัง parse ไฟล์ ${fi + 1}/${fileArr.length}: ${file.name}…`)
 
-          // 2. Ask server to fetch & parse it
-          setUploadProgress(`กำลังประมวลผล ${file.name}…`)
-          const res = await fetch('/api/import', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              blobUrl:  blob.url,
-              filename: file.name,
-              replace:  i === 0 && replace, // clear only before first file
-            }),
+          const parsed = await new Promise<{ headers: string[]; rows: string[][] }>((resolve, reject) => {
+            Papa.parse(file, {
+              header:         false,
+              skipEmptyLines: true,
+              complete: (res) => {
+                const all = res.data as string[][]
+                resolve({ headers: all[0] ?? [], rows: all.slice(1) })
+              },
+              error: reject,
+            })
           })
-          if (!res.ok) {
-            const data = await res.json()
-            throw new Error(data.error ?? 'Processing failed')
+
+          const { headers, rows } = parsed
+          const totalChunks = Math.ceil(rows.length / CHUNK_ROWS)
+
+          // 2. Send in small chunks — each chunk is just a few hundred KB
+          for (let ci = 0; ci < totalChunks; ci++) {
+            const chunkRows = rows.slice(ci * CHUNK_ROWS, (ci + 1) * CHUNK_ROWS)
+            const pct       = Math.round(((ci + 1) / totalChunks) * 100)
+            const rowsDone  = Math.min((ci + 1) * CHUNK_ROWS, rows.length)
+
+            setUploadProgress(
+              `ไฟล์ ${fi + 1}/${fileArr.length} · chunk ${ci + 1}/${totalChunks} (${rowsDone.toLocaleString()} / ${rows.length.toLocaleString()} rows · ${pct}%)`
+            )
+
+            const res = await fetch('/api/import', {
+              method:  'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body:    JSON.stringify({
+                headers,
+                rows:     chunkRows,
+                filename: file.name,
+                // clear DB only before the very first chunk of the first file
+                replace: fi === 0 && ci === 0 && replace,
+              }),
+            })
+            if (!res.ok) {
+              const data = await res.json().catch(() => ({}))
+              throw new Error((data as { error?: string }).error ?? `Chunk ${ci + 1} failed`)
+            }
+            const data: ImportResult = await res.json()
+            totalInserted += data.inserted
+            totalSkipped  += data.skipped
+            if (ci === totalChunks - 1) batchSummaries.push(...data.batches)
           }
-          const data: ImportResult = await res.json()
-          totalInserted += data.inserted
-          totalSkipped  += data.skipped
-          batchSummaries.push(...data.batches)
         }
 
         setResult({ ok: true, inserted: totalInserted, skipped: totalSkipped, batches: batchSummaries })

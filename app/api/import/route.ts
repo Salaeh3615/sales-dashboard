@@ -1,21 +1,26 @@
 /**
  * /api/import
  *
- * POST — two modes:
- *   1. FormData { files, replace }   — local dev (files < 4.5 MB each)
- *   2. JSON { blobUrl, filename, replace } — Vercel production (any size)
- *      Browser uploads directly to Blob, then calls this with the URL.
+ * POST — three modes:
+ *   1. JSON { headers, rows, filename, replace }  — Vercel production
+ *      Browser parses CSV locally, sends raw rows in small chunks.
+ *      Each chunk is ~1-2 MB — well under Vercel's 4.5 MB limit.
+ *      Server reconstructs a mini-CSV and uses the existing parser.
  *
- * GET  — returns DB stats + blobMode flag for the admin page.
- * DELETE — wipes the database.
+ *   2. JSON { blobUrl, filename, replace }  — legacy blob-URL mode (kept for compat)
+ *
+ *   3. FormData { files, replace }  — local dev
+ *
+ * GET    — DB stats + blobMode flag
+ * DELETE — wipe database
  */
 
 import { NextResponse } from 'next/server'
 import { parseFileBuffer } from '@/lib/data-loader/serverLoader'
 import { appendRecords, clearAll, getBatches, getDbMeta } from '@/lib/db/store'
 
-export const dynamic = 'force-dynamic'
-export const runtime  = 'nodejs'
+export const dynamic    = 'force-dynamic'
+export const runtime    = 'nodejs'
 export const maxDuration = 60
 
 const USE_BLOB = typeof process.env.BLOB_READ_WRITE_TOKEN === 'string' &&
@@ -27,50 +32,73 @@ export async function POST(req: Request) {
   try {
     const contentType = req.headers.get('content-type') ?? ''
 
-    // ── Mode 1: blob URL (production) ────────────────────────────────────────
     if (contentType.includes('application/json')) {
-      const { blobUrl, filename, replace } = await req.json() as {
-        blobUrl: string
-        filename: string
-        replace?: boolean
+      const body = await req.json() as {
+        // chunk mode
+        headers?: string[]
+        rows?:    string[][]
+        // blob-url mode
+        blobUrl?:  string
+        filename:  string
+        replace?:  boolean
       }
 
-      if (!blobUrl || !filename) {
-        return NextResponse.json({ error: 'blobUrl and filename required' }, { status: 400 })
+      if (body.replace) await clearAll()
+
+      // ── Mode A: raw CSV rows from browser (chunk upload) ──────────────────
+      if (body.headers && body.rows) {
+        const { headers, rows, filename } = body
+
+        // Rebuild a mini-CSV so the existing parser handles it unchanged
+        const escape = (v: string) => `"${(v ?? '').replace(/"/g, '""')}"`
+        const csvLines = [
+          headers.map(escape).join(','),
+          ...rows.map(row => row.map(escape).join(',')),
+        ]
+        const buffer  = Buffer.from(csvLines.join('\n'), 'utf-8')
+        const records = parseFileBuffer(filename, buffer)
+        const result  = await appendRecords(records, { filename })
+
+        return NextResponse.json({
+          ok:       true,
+          inserted: result.inserted,
+          skipped:  result.skipped,
+          batches:  [{ filename, inserted: result.inserted, skipped: result.skipped }],
+        })
       }
 
-      if (replace) await clearAll()
+      // ── Mode B: blob-URL (legacy) ─────────────────────────────────────────
+      if (body.blobUrl) {
+        const { blobUrl, filename } = body
+        const res = await fetch(blobUrl)
+        if (!res.ok) throw new Error(`Failed to fetch blob: ${res.status}`)
+        const buffer  = Buffer.from(await res.arrayBuffer())
+        const records = parseFileBuffer(filename, buffer)
+        const result  = await appendRecords(records, { filename })
 
-      // Fetch the CSV/XLSX from Blob storage and parse it
-      const res = await fetch(blobUrl)
-      if (!res.ok) throw new Error(`Failed to fetch blob: ${res.status}`)
-      const buffer = Buffer.from(await res.arrayBuffer())
+        try {
+          const { del } = await import('@vercel/blob')
+          await del(blobUrl)
+        } catch { /* non-fatal */ }
 
-      const records = parseFileBuffer(filename, buffer)
-      const result  = await appendRecords(records, { filename })
+        return NextResponse.json({
+          ok:       true,
+          inserted: result.inserted,
+          skipped:  result.skipped,
+          batches:  [{ filename, inserted: result.inserted, skipped: result.skipped }],
+        })
+      }
 
-      // Clean up the temporary upload blob
-      try {
-        const { del } = await import('@vercel/blob')
-        await del(blobUrl)
-      } catch { /* non-fatal */ }
-
-      return NextResponse.json({
-        ok: true,
-        inserted: result.inserted,
-        skipped:  result.skipped,
-        batches:  [{ filename, inserted: result.inserted, skipped: result.skipped }],
-      })
+      return NextResponse.json({ error: 'Missing rows or blobUrl' }, { status: 400 })
     }
 
-    // ── Mode 2: FormData (local dev) ─────────────────────────────────────────
-    const form  = await req.formData()
-    const files = form.getAll('files') as File[]
+    // ── Mode C: FormData (local dev) ─────────────────────────────────────────
+    const form    = await req.formData()
+    const files   = form.getAll('files') as File[]
     const replace = form.get('replace') === 'true'
 
-    if (files.length === 0) {
+    if (files.length === 0)
       return NextResponse.json({ error: 'No files uploaded' }, { status: 400 })
-    }
 
     if (replace) await clearAll()
 
@@ -88,10 +116,7 @@ export async function POST(req: Request) {
     }
 
     return NextResponse.json({
-      ok: true,
-      inserted: totalInserted,
-      skipped:  totalSkipped,
-      batches:  batchSummaries,
+      ok: true, inserted: totalInserted, skipped: totalSkipped, batches: batchSummaries,
     })
 
   } catch (err) {
@@ -111,7 +136,7 @@ export async function GET() {
     batches,
     recordCount:  meta.totalRecords,
     rawAmountSum: meta.rawAmountSum,
-    blobMode:     USE_BLOB,          // tells the admin page which upload path to use
+    blobMode:     USE_BLOB,
   })
 }
 
