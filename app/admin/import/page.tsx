@@ -144,7 +144,7 @@ export default function AdminImportPage() {
 
       // ── Blob mode (Vercel production): parse CSV in browser, send chunks ────
       if (blobMode) {
-        const CHUNK_ROWS = 2000   // ~1-2 MB per request — safely under 4.5 MB limit
+        const CHUNK_ROWS = 400    // ~0.5 MB per request — safely under Vercel's 4.5 MB limit
 
         let totalInserted = 0
         let totalSkipped  = 0
