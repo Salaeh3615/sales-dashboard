@@ -33,6 +33,7 @@ import {
   Upload, RefreshCw, FileText, Trash2,
   CheckCircle2, AlertTriangle, Database, BarChart3,
 } from 'lucide-react'
+import Papa from 'papaparse'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -126,7 +127,6 @@ export default function AdminImportPage() {
 
       // ── Blob mode (Vercel production): parse CSV in browser, send chunks ────
       if (blobMode) {
-        const Papa = (await import('papaparse')).default
         const CHUNK_ROWS = 2000   // ~1-2 MB per request — safely under 4.5 MB limit
 
         let totalInserted = 0
