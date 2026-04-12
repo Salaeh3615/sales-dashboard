@@ -92,7 +92,7 @@ async function blobReadString(pathname: string): Promise<string | null> {
 async function blobWriteString(pathname: string, content: string): Promise<void> {
   const { put } = await import('@vercel/blob')
   await put(pathname, content, {
-    access: 'private', addRandomSuffix: false,
+    access: 'private', addRandomSuffix: false, allowOverwrite: true,
     contentType: 'text/plain; charset=utf-8',
   })
 }
@@ -102,7 +102,7 @@ async function blobWriteNdjson(pathname: string, records: SalesRecord[]): Promis
   const { put } = await import('@vercel/blob')
   const content = records.map(r => JSON.stringify(r)).join('\n') + '\n'
   await put(pathname, content, {
-    access: 'private', addRandomSuffix: false,
+    access: 'private', addRandomSuffix: false, allowOverwrite: true,
     contentType: 'text/plain; charset=utf-8',
   })
 }
