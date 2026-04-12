@@ -17,6 +17,8 @@
 
 import { NextResponse } from 'next/server'
 import { parseFileBuffer } from '@/lib/data-loader/serverLoader'
+import { transformRows } from '@/lib/transformers/recordTransformer'
+import type { RawRow } from '@/types'
 import { appendRecords, clearAll, getBatches, getDbMeta } from '@/lib/db/store'
 
 export const dynamic    = 'force-dynamic'
@@ -49,14 +51,14 @@ export async function POST(req: Request) {
       if (body.headers && body.rows) {
         const { headers, rows, filename } = body
 
-        // Rebuild a mini-CSV so the existing parser handles it unchanged
-        const escape = (v: string) => `"${(v ?? '').replace(/"/g, '""')}"`
-        const csvLines = [
-          headers.map(escape).join(','),
-          ...rows.map(row => row.map(escape).join(',')),
-        ]
-        const buffer  = Buffer.from(csvLines.join('\n'), 'utf-8')
-        const records = parseFileBuffer(filename, buffer)
+        // Directly transform rows without rebuilding CSV — avoids re-parse issues.
+        // Client already split header row from data rows; we just key them.
+        const keyed: RawRow[] = rows.map(row => {
+          const obj: RawRow = {}
+          headers.forEach((h, i) => { if (h) obj[h] = String(row[i] ?? '').trim() })
+          return obj
+        })
+        const records = transformRows(headers, keyed)
         const result  = await appendRecords(records, { filename })
 
         return NextResponse.json({
