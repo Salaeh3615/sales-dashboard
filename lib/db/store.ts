@@ -66,14 +66,25 @@ const B = {
   meta:      'clt-db/meta.json',
 } as const
 
+// Private blob fetch — adds Authorization header for private-access stores
+async function blobFetch(url: string): Promise<Response | null> {
+  try {
+    const token = process.env.BLOB_READ_WRITE_TOKEN ?? ''
+    const res   = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    return res.ok ? res : null
+  } catch { return null }
+}
+
 async function blobReadString(pathname: string): Promise<string | null> {
   const { list } = await import('@vercel/blob')
   const { blobs } = await list({ prefix: pathname, limit: 5 })
   const found = blobs.find(b => b.pathname === pathname)
   if (!found) return null
   try {
-    const res = await fetch(found.url + '?_=' + found.uploadedAt)
-    if (!res.ok) return null
+    const res = await blobFetch(found.url + '?_=' + found.uploadedAt)
+    if (!res) return null
     return res.text()
   } catch { return null }
 }
@@ -81,17 +92,16 @@ async function blobReadString(pathname: string): Promise<string | null> {
 async function blobWriteString(pathname: string, content: string): Promise<void> {
   const { put } = await import('@vercel/blob')
   await put(pathname, content, {
-    access: 'public', addRandomSuffix: false,
+    access: 'private', addRandomSuffix: false,
     contentType: 'text/plain; charset=utf-8',
   })
 }
 
 async function blobWriteNdjson(pathname: string, records: SalesRecord[]): Promise<void> {
   const { put } = await import('@vercel/blob')
-  // Build NDJSON as a plain string — avoids Node.js Readable.from() compatibility issues
   const content = records.map(r => JSON.stringify(r)).join('\n') + (records.length > 0 ? '\n' : '')
   await put(pathname, content, {
-    access: 'public', addRandomSuffix: false,
+    access: 'private', addRandomSuffix: false,
     contentType: 'text/plain; charset=utf-8',
   })
 }
@@ -133,8 +143,8 @@ async function loadFromBlob(): Promise<StoreShape> {
     const buffers = await Promise.all(
       chunk.map(async b => {
         try {
-          const res = await fetch(b.url + '?_=' + b.uploadedAt)
-          if (!res.ok) return null
+          const res = await blobFetch(b.url + '?_=' + b.uploadedAt)
+          if (!res) return null
           return Buffer.from(await res.arrayBuffer())
         } catch { return null }
       })
