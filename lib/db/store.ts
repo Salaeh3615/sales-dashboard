@@ -58,50 +58,73 @@ function parseNdjsonBuffer(buf: Buffer): SalesRecord[] {
 }
 
 // ─── Blob helpers ─────────────────────────────────────────────────────────────
+// IMPORTANT: We NEVER call list() in normal read/write flow.
+// list() is a "Blob Advanced Operation" with a tight monthly free-tier limit (2K).
+// put() / del() / direct fetch() are "Simple Operations" with a 10K limit.
+//
+// Strategy: derive the store base URL from the first put() response, then use
+// direct fetch(<baseUrl>/<pathname>) for all reads — zero list() calls.
 
 const B = {
   batchDir:  'clt-db/batches/',
   batchFile: (id: string) => `clt-db/batches/${id}.ndjson`,
   batches:   'clt-db/batches.json',
   meta:      'clt-db/meta.json',
+  init:      'clt-db/.init',
 } as const
 
-// Fetch a blob URL (public store — no auth header needed)
-async function blobFetch(url: string): Promise<Response | null> {
-  try {
-    const res = await fetch(url)
-    return res.ok ? res : null
-  } catch { return null }
+// Module-level cache of the blob store base URL.
+// Populated lazily from the first put() response.
+let _blobBase: string | null = null
+
+function extractBase(url: string): string | null {
+  const m = url.match(/^(https:\/\/[^/]+\.public\.blob\.vercel-storage\.com)/)
+  return m ? m[1] : null
 }
 
+/**
+ * Returns the store base URL, doing one small put() on cold start if needed.
+ * put() = Simple Operation (10K free limit) — NOT an Advanced Operation.
+ */
+async function getBlobBase(): Promise<string> {
+  if (_blobBase) return _blobBase
+  const { put } = await import('@vercel/blob')
+  const r = await put(B.init, '1', {
+    access: 'public', addRandomSuffix: false, allowOverwrite: true,
+    contentType: 'text/plain',
+  })
+  _blobBase = extractBase(r.url)
+  if (!_blobBase) throw new Error('Cannot derive Vercel Blob base URL from put() response')
+  return _blobBase
+}
+
+/** Direct read by pathname — 0 Advanced Operations (no list() call) */
 async function blobReadString(pathname: string): Promise<string | null> {
-  const { list } = await import('@vercel/blob')
-  const { blobs } = await list({ prefix: pathname, limit: 5 })
-  const found = blobs.find(b => b.pathname === pathname)
-  if (!found) return null
+  const base = await getBlobBase()
   try {
-    const res = await blobFetch(found.url + '?_=' + found.uploadedAt)
-    if (!res) return null
-    return res.text()
+    const res = await fetch(`${base}/${pathname}?t=${Date.now()}`)
+    return res.ok ? res.text() : null
   } catch { return null }
 }
 
 async function blobWriteString(pathname: string, content: string): Promise<void> {
   const { put } = await import('@vercel/blob')
-  await put(pathname, content, {
+  const r = await put(pathname, content, {
     access: 'public', addRandomSuffix: false, allowOverwrite: true,
     contentType: 'text/plain; charset=utf-8',
   })
+  if (!_blobBase) _blobBase = extractBase(r.url)
 }
 
 async function blobWriteNdjson(pathname: string, records: SalesRecord[]): Promise<void> {
   if (records.length === 0) return   // Vercel Blob requires non-empty body
   const { put } = await import('@vercel/blob')
   const content = records.map(r => JSON.stringify(r)).join('\n') + '\n'
-  await put(pathname, content, {
+  const r = await put(pathname, content, {
     access: 'public', addRandomSuffix: false, allowOverwrite: true,
     contentType: 'text/plain; charset=utf-8',
   })
+  if (!_blobBase) _blobBase = extractBase(r.url)
 }
 
 // ─── Local filesystem helpers ─────────────────────────────────────────────────
@@ -127,23 +150,24 @@ const EMPTY_STORE: StoreShape = { version: 1, records: [], batches: [] }
 // ─── Load ─────────────────────────────────────────────────────────────────────
 
 async function loadFromBlob(): Promise<StoreShape> {
-  const { list } = await import('@vercel/blob')
+  // Read batches.json to get batch IDs — direct fetch, 0 list() calls
+  const batchesRaw = await blobReadString(B.batches)
+  const batches: ImportBatch[] = batchesRaw ? JSON.parse(batchesRaw) : []
 
-  // List all per-batch ndjson files
-  const { blobs } = await list({ prefix: B.batchDir, limit: 1000 })
-  const batchBlobs = blobs.filter(b => b.pathname.endsWith('.ndjson'))
+  if (batches.length === 0) return { version: 1, records: [], batches: [] }
 
-  // Download all batch files in parallel (up to 10 at once)
+  // Fetch each batch file by constructed URL — direct fetch, 0 list() calls
+  const base = await getBlobBase()
   const chunkSize = 10
   const allRecords: SalesRecord[] = []
-  for (let i = 0; i < batchBlobs.length; i += chunkSize) {
-    const chunk = batchBlobs.slice(i, i + chunkSize)
+
+  for (let i = 0; i < batches.length; i += chunkSize) {
+    const chunk = batches.slice(i, i + chunkSize)
     const buffers = await Promise.all(
       chunk.map(async b => {
         try {
-          const res = await blobFetch(b.url + '?_=' + b.uploadedAt)
-          if (!res) return null
-          return Buffer.from(await res.arrayBuffer())
+          const res = await fetch(`${base}/${B.batchFile(b.id)}?t=${Date.now()}`)
+          return res.ok ? Buffer.from(await res.arrayBuffer()) : null
         } catch { return null }
       })
     )
@@ -151,10 +175,6 @@ async function loadFromBlob(): Promise<StoreShape> {
       if (buf) allRecords.push(...parseNdjsonBuffer(buf))
     }
   }
-
-  // Load batch metadata
-  const batchesRaw = await blobReadString(B.batches)
-  const batches: ImportBatch[] = batchesRaw ? JSON.parse(batchesRaw) : []
 
   return { version: 1, records: allRecords, batches }
 }
@@ -319,29 +339,25 @@ export async function appendRecords(
 
 export async function clearAll(): Promise<void> {
   if (USE_BLOB) {
-    const { list, del } = await import('@vercel/blob')
+    const { del } = await import('@vercel/blob')
+    const base = await getBlobBase()
 
-    // Delete all batch ndjson files (non-fatal if none exist)
+    // Delete batch files by known IDs (no list() call needed)
     try {
-      const { blobs } = await list({ prefix: B.batchDir, limit: 1000 })
-      if (blobs.length > 0) {
-        await del(blobs.map(b => b.url))
+      const batchesRaw = await blobReadString(B.batches)
+      const batches: ImportBatch[] = batchesRaw ? JSON.parse(batchesRaw) : []
+      if (batches.length > 0) {
+        const urls = batches.map(b => `${base}/${B.batchFile(b.id)}`)
+        // del() accepts up to 100 URLs at once
+        for (let i = 0; i < urls.length; i += 100) {
+          await del(urls.slice(i, i + 100)).catch(() => {})
+        }
       }
     } catch (e) {
-      console.warn('[clearAll] del batch blobs failed (non-fatal):', e)
+      console.warn('[clearAll] delete batch files failed (non-fatal):', e)
     }
 
-    // Delete existing batches.json and meta.json blobs so we can re-create them
-    // (allowOverwrite handles overwrite, but also try explicit delete first)
-    try {
-      const { blobs: metaBlobs } = await list({ prefix: 'clt-db/', limit: 20 })
-      const toDelete = metaBlobs
-        .filter(b => b.pathname === B.batches || b.pathname === B.meta)
-        .map(b => b.url)
-      if (toDelete.length > 0) await del(toDelete)
-    } catch { /* non-fatal */ }
-
-    // Re-create empty metadata files
+    // Reset metadata (allowOverwrite handles overwrite)
     await Promise.all([
       blobWriteString(B.batches, '[]'),
       blobWriteString(B.meta, JSON.stringify({ totalRecords: 0, rawAmountSum: 0 })),
