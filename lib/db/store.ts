@@ -98,8 +98,9 @@ async function blobWriteString(pathname: string, content: string): Promise<void>
 }
 
 async function blobWriteNdjson(pathname: string, records: SalesRecord[]): Promise<void> {
+  if (records.length === 0) return   // Vercel Blob requires non-empty body
   const { put } = await import('@vercel/blob')
-  const content = records.map(r => JSON.stringify(r)).join('\n') + (records.length > 0 ? '\n' : '')
+  const content = records.map(r => JSON.stringify(r)).join('\n') + '\n'
   await put(pathname, content, {
     access: 'private', addRandomSuffix: false,
     contentType: 'text/plain; charset=utf-8',
@@ -284,8 +285,10 @@ export async function appendRecords(
   }
 
   if (USE_BLOB) {
-    // 1. Upload this batch's records as its own blob file
-    await blobWriteNdjson(B.batchFile(batchId), newRecords)
+    // 1. Upload this batch's records as its own blob file (skip if empty chunk)
+    if (newRecords.length > 0) {
+      await blobWriteNdjson(B.batchFile(batchId), newRecords)
+    }
 
     // 2. Update batches.json
     const batchesRaw = await blobReadString(B.batches)

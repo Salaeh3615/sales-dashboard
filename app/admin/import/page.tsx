@@ -147,13 +147,20 @@ export default function AdminImportPage() {
               skipEmptyLines: true,
               complete: (res) => {
                 const all = res.data as string[][]
+                if (!all || all.length < 2) {
+                  reject(new Error(
+                    `ไม่พบข้อมูลในไฟล์ "${file.name}" (พบ ${all?.length ?? 0} บรรทัด) — ตรวจสอบว่าเป็น CSV และมีข้อมูล`
+                  ))
+                  return
+                }
                 resolve({ headers: all[0] ?? [], rows: all.slice(1) })
               },
-              error: reject,
+              error: (err) => reject(new Error(`PapaParse error: ${err.message ?? String(err)}`)),
             })
           })
 
           const { headers, rows } = parsed
+          setUploadProgress(`parse สำเร็จ: ${rows.length.toLocaleString()} rows — กำลังส่งข้อมูล…`)
           const totalChunks = Math.ceil(rows.length / CHUNK_ROWS)
 
           // 2. Send in small chunks — each chunk is just a few hundred KB
