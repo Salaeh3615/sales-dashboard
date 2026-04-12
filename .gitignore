@@ -1,0 +1,26 @@
+# Next.js
+.next/
+out/
+build/
+
+# Dependencies
+node_modules/
+
+# Local data (never commit — use Vercel Blob in production)
+data/
+*.ndjson
+*.ndjson.tmp
+
+# Environment variables
+.env
+.env.local
+.env*.local
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/settings.json
+
+# Vercel
+.vercel/

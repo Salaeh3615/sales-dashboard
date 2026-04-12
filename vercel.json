@@ -1,0 +1,11 @@
+{
+  "buildCommand": "next build",
+  "outputDirectory": ".next",
+  "framework": "nextjs",
+  "functions": {
+    "app/api/customers/route.ts": { "maxDuration": 60 },
+    "app/api/comparison/route.ts": { "maxDuration": 60 },
+    "app/api/import/route.ts": { "maxDuration": 60 },
+    "app/api/records/route.ts": { "maxDuration": 60 }
+  }
+}
