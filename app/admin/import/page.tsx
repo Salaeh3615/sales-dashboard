@@ -33,7 +33,9 @@ import {
   Upload, RefreshCw, FileText, Trash2,
   CheckCircle2, AlertTriangle, Database, BarChart3,
 } from 'lucide-react'
-import Papa from 'papaparse'
+import * as PapaModule from 'papaparse'
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const Papa: typeof import('papaparse') = (PapaModule as any).default ?? PapaModule
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 

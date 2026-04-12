@@ -87,12 +87,10 @@ async function blobWriteString(pathname: string, content: string): Promise<void>
 }
 
 async function blobWriteNdjson(pathname: string, records: SalesRecord[]): Promise<void> {
-  const { put }      = await import('@vercel/blob')
-  const { Readable } = await import('stream')
-  const stream = Readable.from(
-    (function* () { for (const r of records) yield JSON.stringify(r) + '\n' })()
-  )
-  await put(pathname, stream, {
+  const { put } = await import('@vercel/blob')
+  // Build NDJSON as a plain string — avoids Node.js Readable.from() compatibility issues
+  const content = records.map(r => JSON.stringify(r)).join('\n') + (records.length > 0 ? '\n' : '')
+  await put(pathname, content, {
     access: 'public', addRandomSuffix: false,
     contentType: 'text/plain; charset=utf-8',
   })
