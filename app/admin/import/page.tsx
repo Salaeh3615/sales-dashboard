@@ -87,7 +87,9 @@ export default function AdminImportPage() {
   const [validating, setValidating] = useState(false)
   const [validation, setValidation] = useState<ValidationGroup[] | null>(null)
   const [valSummary, setValSummary] = useState<{ passed: number; failed: number } | null>(null)
-  const [origin, setOrigin] = useState('https://your-app.vercel.app')
+  const [origin, setOrigin]   = useState('https://your-app.vercel.app')
+  const [blobMode, setBlobMode] = useState(false)
+  const [uploadProgress, setUploadProgress] = useState('')
 
   // ── Load DB stats on mount ──────────────────────────────────────────────────
   const refreshStats = async () => {
@@ -99,6 +101,7 @@ export default function AdminImportPage() {
         recordCount:  data.recordCount  ?? 0,
         rawAmountSum: data.rawAmountSum ?? 0,
       })
+      setBlobMode(data.blobMode ?? false)
     } catch (e) {
       console.error(e)
     }
@@ -116,10 +119,61 @@ export default function AdminImportPage() {
     setError(null)
     setResult(null)
     setValidation(null)
+    setUploadProgress('')
+
     try {
+      const fileArr = Array.from(files)
+
+      // ── Blob mode (Vercel production): upload directly to Blob CDN ──────────
+      if (blobMode) {
+        const { upload: blobUpload } = await import('@vercel/blob/client')
+
+        let totalInserted = 0
+        let totalSkipped  = 0
+        const batchSummaries: { filename: string; inserted: number; skipped: number }[] = []
+
+        for (let i = 0; i < fileArr.length; i++) {
+          const file = fileArr[i]
+          setUploadProgress(`กำลัง upload ไฟล์ ${i + 1}/${fileArr.length}: ${file.name}…`)
+
+          // 1. Upload file directly to Vercel Blob
+          const blob = await blobUpload(
+            `clt-uploads/${Date.now()}-${file.name}`,
+            file,
+            { access: 'public', handleUploadUrl: '/api/import/upload-url' },
+          )
+
+          // 2. Ask server to fetch & parse it
+          setUploadProgress(`กำลังประมวลผล ${file.name}…`)
+          const res = await fetch('/api/import', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              blobUrl:  blob.url,
+              filename: file.name,
+              replace:  i === 0 && replace, // clear only before first file
+            }),
+          })
+          if (!res.ok) {
+            const data = await res.json()
+            throw new Error(data.error ?? 'Processing failed')
+          }
+          const data: ImportResult = await res.json()
+          totalInserted += data.inserted
+          totalSkipped  += data.skipped
+          batchSummaries.push(...data.batches)
+        }
+
+        setResult({ ok: true, inserted: totalInserted, skipped: totalSkipped, batches: batchSummaries })
+        await refreshStats()
+        return
+      }
+
+      // ── Local mode: send via FormData ────────────────────────────────────────
       const fd = new FormData()
-      Array.from(files).forEach((f) => fd.append('files', f))
+      fileArr.forEach((f) => fd.append('files', f))
       if (replace) fd.append('replace', 'true')
+      setUploadProgress('กำลัง upload…')
       const res = await fetch('/api/import', { method: 'POST', body: fd })
       if (!res.ok) {
         const data = await res.json()
@@ -128,10 +182,12 @@ export default function AdminImportPage() {
       const data: ImportResult = await res.json()
       setResult(data)
       await refreshStats()
+
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Upload failed')
     } finally {
       setLoading(false)
+      setUploadProgress('')
     }
   }
 
@@ -286,7 +342,7 @@ export default function AdminImportPage() {
           : <Upload size={36} className="text-slate-400" />}
         <div className="text-center">
           <p className="text-sm font-semibold text-slate-700">
-            {loading ? 'Importing…' : 'Drop CSV / Excel files here'}
+            {uploadProgress || (loading ? 'Importing…' : 'Drop CSV / Excel files here')}
           </p>
           <p className="text-xs text-slate-500 mt-1">
             Multiple files allowed · duplicates detected automatically
