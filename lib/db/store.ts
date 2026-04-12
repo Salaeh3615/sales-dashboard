@@ -323,12 +323,28 @@ export async function appendRecords(
 export async function clearAll(): Promise<void> {
   if (USE_BLOB) {
     const { list, del } = await import('@vercel/blob')
-    // Delete all batch ndjson files
-    const { blobs } = await list({ prefix: B.batchDir, limit: 1000 })
-    if (blobs.length > 0) {
-      await del(blobs.map(b => b.url))
+
+    // Delete all batch ndjson files (non-fatal if none exist)
+    try {
+      const { blobs } = await list({ prefix: B.batchDir, limit: 1000 })
+      if (blobs.length > 0) {
+        await del(blobs.map(b => b.url))
+      }
+    } catch (e) {
+      console.warn('[clearAll] del batch blobs failed (non-fatal):', e)
     }
-    // Reset metadata
+
+    // Delete existing batches.json and meta.json blobs so we can re-create them
+    // (allowOverwrite handles overwrite, but also try explicit delete first)
+    try {
+      const { blobs: metaBlobs } = await list({ prefix: 'clt-db/', limit: 20 })
+      const toDelete = metaBlobs
+        .filter(b => b.pathname === B.batches || b.pathname === B.meta)
+        .map(b => b.url)
+      if (toDelete.length > 0) await del(toDelete)
+    } catch { /* non-fatal */ }
+
+    // Re-create empty metadata files
     await Promise.all([
       blobWriteString(B.batches, '[]'),
       blobWriteString(B.meta, JSON.stringify({ totalRecords: 0, rawAmountSum: 0 })),

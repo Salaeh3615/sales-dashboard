@@ -230,10 +230,17 @@ export default function AdminImportPage() {
     )) return
     setLoading(true)
     setValidation(null)
+    setError(null)
     try {
-      await fetch('/api/import', { method: 'DELETE' })
+      const res = await fetch('/api/import', { method: 'DELETE' })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error((data as { error?: string }).error ?? `Clear failed (${res.status})`)
+      }
       setResult(null)
       await refreshStats()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Clear failed')
     } finally {
       setLoading(false)
     }
