@@ -25,8 +25,10 @@ export const dynamic    = 'force-dynamic'
 export const runtime    = 'nodejs'
 export const maxDuration = 60
 
-const USE_BLOB = typeof process.env.BLOB_READ_WRITE_TOKEN === 'string' &&
-                 process.env.BLOB_READ_WRITE_TOKEN.length > 0
+const USE_KV   = typeof process.env.KV_REST_API_URL === 'string' && process.env.KV_REST_API_URL.length > 0
+const USE_BLOB = !USE_KV && typeof process.env.BLOB_READ_WRITE_TOKEN === 'string' && process.env.BLOB_READ_WRITE_TOKEN.length > 0
+// blobMode = true means "don't send raw file bytes — parse CSV in browser and send chunks"
+const CHUNK_MODE = USE_KV || USE_BLOB
 
 // ─── POST ─────────────────────────────────────────────────────────────────────
 
@@ -138,7 +140,7 @@ export async function GET() {
     batches,
     recordCount:  meta.totalRecords,
     rawAmountSum: meta.rawAmountSum,
-    blobMode:     USE_BLOB,
+    blobMode:     CHUNK_MODE,   // tells admin page to parse CSV in browser
   })
 }
 

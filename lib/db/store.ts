@@ -1,16 +1,15 @@
 /**
- * store.ts — Storage layer with two backends:
+ * store.ts — Storage layer with three backends:
  *
- *   LOCAL  (default / dev)  — reads & writes files under ./data/
- *   BLOB   (Vercel prod)    — Vercel Blob Storage (BLOB_READ_WRITE_TOKEN set)
+ *   KV     (Vercel prod, preferred) — Upstash Redis via @vercel/kv
+ *                                     Env: KV_REST_API_URL + KV_REST_API_TOKEN
+ *   BLOB   (Vercel prod, fallback)  — Vercel Blob (BLOB_READ_WRITE_TOKEN set)
+ *   LOCAL  (dev / default)          — reads & writes files under ./data/
  *
- * BLOB mode uses per-batch files so imports are always O(batch_size) writes,
- * never O(total_records).  This avoids re-uploading the full dataset on every
- * import chunk and prevents Vercel function timeouts.
- *
- *   clt-db/batches/{id}.ndjson  — one file per import batch
- *   clt-db/batches.json         — batch metadata list
- *   clt-db/meta.json            — quick stats (totalRecords, rawAmountSum)
+ * KV mode stores per-batch records as Redis keys:
+ *   clt:batch:<id>   — NDJSON string of records for one import batch
+ *   clt:batches      — JSON array of ImportBatch metadata
+ *   clt:meta         — JSON object { totalRecords, rawAmountSum }
  */
 
 import type { SalesRecord } from '@/types'
@@ -37,7 +36,9 @@ export type StoreShape = {
 
 // ─── Backend selection ────────────────────────────────────────────────────────
 
-const USE_BLOB = typeof process.env.BLOB_READ_WRITE_TOKEN === 'string' &&
+const USE_KV   = typeof process.env.KV_REST_API_URL   === 'string' && process.env.KV_REST_API_URL.length   > 0
+const USE_BLOB = !USE_KV &&
+                 typeof process.env.BLOB_READ_WRITE_TOKEN === 'string' &&
                  process.env.BLOB_READ_WRITE_TOKEN.length > 0
 
 // ─── NDJSON parser ────────────────────────────────────────────────────────────
@@ -57,74 +58,69 @@ function parseNdjsonBuffer(buf: Buffer): SalesRecord[] {
   return records
 }
 
-// ─── Blob helpers ─────────────────────────────────────────────────────────────
-// IMPORTANT: We NEVER call list() in normal read/write flow.
-// list() is a "Blob Advanced Operation" with a tight monthly free-tier limit (2K).
-// put() / del() / direct fetch() are "Simple Operations" with a 10K limit.
-//
-// Strategy: derive the store base URL from the first put() response, then use
-// direct fetch(<baseUrl>/<pathname>) for all reads — zero list() calls.
+function parseNdjsonString(s: string): SalesRecord[] {
+  return s.split('\n').filter(l => l.trim()).map(l => JSON.parse(l) as SalesRecord)
+}
+
+// ─── KV helpers (Upstash / @vercel/kv) ───────────────────────────────────────
+// Uses only get / set / del — all "Simple Commands", no scan/keys/list calls.
+
+const K = {
+  batches:   'clt:batches',
+  meta:      'clt:meta',
+  batch: (id: string) => `clt:batch:${id}`,
+} as const
+
+async function kvGet(key: string): Promise<string | null> {
+  const { kv } = await import('@vercel/kv')
+  return kv.get<string>(key)
+}
+
+async function kvSet(key: string, value: string): Promise<void> {
+  const { kv } = await import('@vercel/kv')
+  await kv.set(key, value)
+}
+
+async function kvDel(...keys: string[]): Promise<void> {
+  if (keys.length === 0) return
+  const { kv } = await import('@vercel/kv')
+  await kv.del(...keys as [string, ...string[]])
+}
+
+// ─── Blob helpers (fallback — see original for notes) ─────────────────────────
 
 const B = {
-  batchDir:  'clt-db/batches/',
   batchFile: (id: string) => `clt-db/batches/${id}.ndjson`,
   batches:   'clt-db/batches.json',
   meta:      'clt-db/meta.json',
   init:      'clt-db/.init',
 } as const
 
-// Module-level cache of the blob store base URL.
-// Populated lazily from the first put() response.
 let _blobBase: string | null = null
-
 function extractBase(url: string): string | null {
   const m = url.match(/^(https:\/\/[^/]+\.public\.blob\.vercel-storage\.com)/)
   return m ? m[1] : null
 }
-
-/**
- * Returns the store base URL, doing one small put() on cold start if needed.
- * put() = Simple Operation (10K free limit) — NOT an Advanced Operation.
- */
 async function getBlobBase(): Promise<string> {
   if (_blobBase) return _blobBase
   const { put } = await import('@vercel/blob')
-  const r = await put(B.init, '1', {
-    access: 'public', addRandomSuffix: false, allowOverwrite: true,
-    contentType: 'text/plain',
-  })
+  const r = await put(B.init, '1', { access: 'public', addRandomSuffix: false, allowOverwrite: true, contentType: 'text/plain' })
   _blobBase = extractBase(r.url)
-  if (!_blobBase) throw new Error('Cannot derive Vercel Blob base URL from put() response')
+  if (!_blobBase) throw new Error('Cannot derive Vercel Blob base URL')
   return _blobBase
 }
-
-/** Direct read by pathname — 0 Advanced Operations (no list() call) */
-async function blobReadString(pathname: string): Promise<string | null> {
+async function blobRead(pathname: string): Promise<string | null> {
   const base = await getBlobBase()
-  try {
-    const res = await fetch(`${base}/${pathname}?t=${Date.now()}`)
-    return res.ok ? res.text() : null
-  } catch { return null }
+  try { const res = await fetch(`${base}/${pathname}?t=${Date.now()}`); return res.ok ? res.text() : null } catch { return null }
 }
-
-async function blobWriteString(pathname: string, content: string): Promise<void> {
+async function blobWrite(pathname: string, content: string): Promise<void> {
   const { put } = await import('@vercel/blob')
-  const r = await put(pathname, content, {
-    access: 'public', addRandomSuffix: false, allowOverwrite: true,
-    contentType: 'text/plain; charset=utf-8',
-  })
+  const r = await put(pathname, content, { access: 'public', addRandomSuffix: false, allowOverwrite: true, contentType: 'text/plain; charset=utf-8' })
   if (!_blobBase) _blobBase = extractBase(r.url)
 }
-
 async function blobWriteNdjson(pathname: string, records: SalesRecord[]): Promise<void> {
-  if (records.length === 0) return   // Vercel Blob requires non-empty body
-  const { put } = await import('@vercel/blob')
-  const content = records.map(r => JSON.stringify(r)).join('\n') + '\n'
-  const r = await put(pathname, content, {
-    access: 'public', addRandomSuffix: false, allowOverwrite: true,
-    contentType: 'text/plain; charset=utf-8',
-  })
-  if (!_blobBase) _blobBase = extractBase(r.url)
+  if (records.length === 0) return
+  await blobWrite(pathname, records.map(r => JSON.stringify(r)).join('\n') + '\n')
 }
 
 // ─── Local filesystem helpers ─────────────────────────────────────────────────
@@ -144,23 +140,35 @@ async function localEnsureDir() {
 // ─── Singleton cache ──────────────────────────────────────────────────────────
 
 let cache: StoreShape | null = null
-
 const EMPTY_STORE: StoreShape = { version: 1, records: [], batches: [] }
 
 // ─── Load ─────────────────────────────────────────────────────────────────────
 
-async function loadFromBlob(): Promise<StoreShape> {
-  // Read batches.json to get batch IDs — direct fetch, 0 list() calls
-  const batchesRaw = await blobReadString(B.batches)
+async function loadFromKV(): Promise<StoreShape> {
+  const batchesRaw = await kvGet(K.batches)
   const batches: ImportBatch[] = batchesRaw ? JSON.parse(batchesRaw) : []
-
   if (batches.length === 0) return { version: 1, records: [], batches: [] }
 
-  // Fetch each batch file by constructed URL — direct fetch, 0 list() calls
+  const chunkSize = 10
+  const allRecords: SalesRecord[] = []
+  for (let i = 0; i < batches.length; i += chunkSize) {
+    const chunk = batches.slice(i, i + chunkSize)
+    const contents = await Promise.all(chunk.map(b => kvGet(K.batch(b.id))))
+    for (const c of contents) {
+      if (c) allRecords.push(...parseNdjsonString(c))
+    }
+  }
+  return { version: 1, records: allRecords, batches }
+}
+
+async function loadFromBlob(): Promise<StoreShape> {
+  const batchesRaw = await blobRead(B.batches)
+  const batches: ImportBatch[] = batchesRaw ? JSON.parse(batchesRaw) : []
+  if (batches.length === 0) return { version: 1, records: [], batches: [] }
+
   const base = await getBlobBase()
   const chunkSize = 10
   const allRecords: SalesRecord[] = []
-
   for (let i = 0; i < batches.length; i += chunkSize) {
     const chunk = batches.slice(i, i + chunkSize)
     const buffers = await Promise.all(
@@ -175,59 +183,40 @@ async function loadFromBlob(): Promise<StoreShape> {
       if (buf) allRecords.push(...parseNdjsonBuffer(buf))
     }
   }
-
   return { version: 1, records: allRecords, batches }
 }
 
 async function loadFromDisk(): Promise<StoreShape> {
   await localEnsureDir()
   const fs = await import('node:fs/promises')
-
-  try {
-    await fs.access(LEGACY_FILE)
-    console.log('[store] Legacy records.json found — removing. Re-import via /admin/import.')
-    await fs.unlink(LEGACY_FILE).catch(() => {})
-  } catch { /* no legacy file */ }
+  try { await fs.access(LEGACY_FILE); await fs.unlink(LEGACY_FILE).catch(() => {}) } catch { /* ok */ }
 
   let records: SalesRecord[] = []
-  try {
-    const buf = await fs.readFile(NDJSON_FILE)
-    records = parseNdjsonBuffer(buf)
-  } catch (e: unknown) {
-    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e
-  }
+  try { records = parseNdjsonBuffer(await fs.readFile(NDJSON_FILE)) }
+  catch (e: unknown) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e }
 
   let batches: ImportBatch[] = []
-  try {
-    batches = JSON.parse(await fs.readFile(BATCHES_FILE, 'utf-8')) as ImportBatch[]
-  } catch (e: unknown) {
-    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e
-  }
+  try { batches = JSON.parse(await fs.readFile(BATCHES_FILE, 'utf-8')) as ImportBatch[] }
+  catch (e: unknown) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e }
 
   return { version: 1, records, batches }
 }
-
-// ─── Save (local only — blob uses per-batch writes) ───────────────────────────
 
 async function saveToDisk(store: StoreShape): Promise<void> {
   await localEnsureDir()
   const fs     = await import('node:fs/promises')
   const fsSync = (await import('node:fs')).default
-
   const ndjsonTmp = NDJSON_FILE + '.tmp'
   await new Promise<void>((resolve, reject) => {
     const ws = fsSync.createWriteStream(ndjsonTmp, { encoding: 'utf-8' })
-    ws.on('error', reject)
-    ws.on('finish', resolve)
+    ws.on('error', reject); ws.on('finish', resolve)
     for (const rec of store.records) ws.write(JSON.stringify(rec) + '\n')
     ws.end()
   })
   await fs.rename(ndjsonTmp, NDJSON_FILE)
-
   const batchesTmp = BATCHES_FILE + '.tmp'
   await fs.writeFile(batchesTmp, JSON.stringify(store.batches), 'utf-8')
   await fs.rename(batchesTmp, BATCHES_FILE)
-
   const meta: DbMeta = {
     totalRecords: store.records.length,
     rawAmountSum: store.records.reduce((s, r) => s + r.netAmount, 0),
@@ -240,7 +229,9 @@ async function saveToDisk(store: StoreShape): Promise<void> {
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 export async function getStore(): Promise<StoreShape> {
-  if (!cache) cache = USE_BLOB ? await loadFromBlob() : await loadFromDisk()
+  if (!cache) {
+    cache = USE_KV ? await loadFromKV() : USE_BLOB ? await loadFromBlob() : await loadFromDisk()
+  }
   return cache
 }
 
@@ -249,13 +240,20 @@ export async function getAllRecords(): Promise<SalesRecord[]> {
 }
 
 export async function getBatches(): Promise<ImportBatch[]> {
+  if (USE_KV) {
+    const raw = await kvGet(K.batches)
+    return raw ? JSON.parse(raw) : []
+  }
   return (await getStore()).batches
 }
 
 export async function getDbMeta(): Promise<DbMeta> {
   try {
-    if (USE_BLOB) {
-      const raw = await blobReadString(B.meta)
+    if (USE_KV) {
+      const raw = await kvGet(K.meta)
+      if (raw) return JSON.parse(raw) as DbMeta
+    } else if (USE_BLOB) {
+      const raw = await blobRead(B.meta)
       if (raw) return JSON.parse(raw) as DbMeta
     } else {
       const fs  = await import('node:fs/promises')
@@ -263,7 +261,6 @@ export async function getDbMeta(): Promise<DbMeta> {
       return JSON.parse(raw) as DbMeta
     }
   } catch { /* fall through */ }
-
   const store = await getStore()
   return {
     totalRecords: store.records.length,
@@ -272,60 +269,54 @@ export async function getDbMeta(): Promise<DbMeta> {
 }
 
 export function recordHash(r: SalesRecord): string {
-  return [
-    r.postingDate, r.documentNo ?? '', r.documentType ?? '',
+  return [r.postingDate, r.documentNo ?? '', r.documentType ?? '',
     r.customerNo ?? r.customerCode ?? '', r.salespersonCode ?? '',
-    r.productCode ?? '', r.testCode ?? '', r.description ?? '',
-    String(r.netAmount),
+    r.productCode ?? '', r.testCode ?? '', r.description ?? '', String(r.netAmount),
   ].join('|')
 }
 
-/**
- * Append records.
- *
- * BLOB mode: writes ONLY the new records as a separate batch blob (O(batch_size)).
- *   No re-writing of existing data — safe, fast, no timeout risk.
- *
- * LOCAL mode: appends to single NDJSON file (same as before).
- */
 export async function appendRecords(
   newRecords: SalesRecord[],
   batchInfo: Omit<ImportBatch, 'id' | 'importedAt' | 'recordCount'>,
 ): Promise<{ inserted: number; skipped: number; batchId: string }> {
   const batchId = `batch-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
-
   const batch: ImportBatch = {
-    id:          batchId,
-    filename:    batchInfo.filename,
-    importedAt:  new Date().toISOString(),
-    recordCount: newRecords.length,
+    id: batchId, filename: batchInfo.filename,
+    importedAt: new Date().toISOString(), recordCount: newRecords.length,
   }
 
-  if (USE_BLOB) {
-    // 1. Upload this batch's records as its own blob file (skip if empty chunk)
+  if (USE_KV) {
+    // 1. Store records as NDJSON string
     if (newRecords.length > 0) {
-      await blobWriteNdjson(B.batchFile(batchId), newRecords)
+      await kvSet(K.batch(batchId), newRecords.map(r => JSON.stringify(r)).join('\n') + '\n')
     }
-
-    // 2. Update batches.json
-    const batchesRaw = await blobReadString(B.batches)
+    // 2. Update batches list
+    const batchesRaw = await kvGet(K.batches)
     const batches: ImportBatch[] = batchesRaw ? JSON.parse(batchesRaw) : []
     batches.push(batch)
-    await blobWriteString(B.batches, JSON.stringify(batches))
-
-    // 3. Update meta.json (incremental — no full scan needed)
+    await kvSet(K.batches, JSON.stringify(batches))
+    // 3. Update meta
     const currentMeta = await getDbMeta()
-    const newMeta: DbMeta = {
+    await kvSet(K.meta, JSON.stringify({
       totalRecords: currentMeta.totalRecords + newRecords.length,
       rawAmountSum: currentMeta.rawAmountSum + newRecords.reduce((s, r) => s + r.netAmount, 0),
-    }
-    await blobWriteString(B.meta, JSON.stringify(newMeta))
+    }))
+    cache = null
 
-    // 4. Invalidate in-memory cache so next read merges this batch
+  } else if (USE_BLOB) {
+    if (newRecords.length > 0) await blobWriteNdjson(B.batchFile(batchId), newRecords)
+    const batchesRaw = await blobRead(B.batches)
+    const batches: ImportBatch[] = batchesRaw ? JSON.parse(batchesRaw) : []
+    batches.push(batch)
+    await blobWrite(B.batches, JSON.stringify(batches))
+    const currentMeta = await getDbMeta()
+    await blobWrite(B.meta, JSON.stringify({
+      totalRecords: currentMeta.totalRecords + newRecords.length,
+      rawAmountSum: currentMeta.rawAmountSum + newRecords.reduce((s, r) => s + r.netAmount, 0),
+    }))
     cache = null
 
   } else {
-    // Local mode: append to in-memory store + rewrite disk files
     const store = await getStore()
     for (const r of newRecords) store.records.push(r)
     store.records.sort((a, b) => a.postingDate.localeCompare(b.postingDate))
@@ -338,30 +329,25 @@ export async function appendRecords(
 }
 
 export async function clearAll(): Promise<void> {
-  if (USE_BLOB) {
+  if (USE_KV) {
+    const batchesRaw = await kvGet(K.batches)
+    const batches: ImportBatch[] = batchesRaw ? JSON.parse(batchesRaw) : []
+    const keys = [K.batches, K.meta, ...batches.map(b => K.batch(b.id))]
+    if (keys.length > 0) await kvDel(...keys)
+
+  } else if (USE_BLOB) {
     const { del } = await import('@vercel/blob')
     const base = await getBlobBase()
-
-    // Delete batch files by known IDs (no list() call needed)
     try {
-      const batchesRaw = await blobReadString(B.batches)
+      const batchesRaw = await blobRead(B.batches)
       const batches: ImportBatch[] = batchesRaw ? JSON.parse(batchesRaw) : []
       if (batches.length > 0) {
         const urls = batches.map(b => `${base}/${B.batchFile(b.id)}`)
-        // del() accepts up to 100 URLs at once
-        for (let i = 0; i < urls.length; i += 100) {
-          await del(urls.slice(i, i + 100)).catch(() => {})
-        }
+        for (let i = 0; i < urls.length; i += 100) await del(urls.slice(i, i + 100)).catch(() => {})
       }
-    } catch (e) {
-      console.warn('[clearAll] delete batch files failed (non-fatal):', e)
-    }
+    } catch (e) { console.warn('[clearAll] blob delete failed (non-fatal):', e) }
+    await Promise.all([blobWrite(B.batches, '[]'), blobWrite(B.meta, JSON.stringify({ totalRecords: 0, rawAmountSum: 0 }))])
 
-    // Reset metadata (allowOverwrite handles overwrite)
-    await Promise.all([
-      blobWriteString(B.batches, '[]'),
-      blobWriteString(B.meta, JSON.stringify({ totalRecords: 0, rawAmountSum: 0 })),
-    ])
   } else {
     cache = { ...EMPTY_STORE }
     await saveToDisk(cache)
@@ -371,5 +357,5 @@ export async function clearAll(): Promise<void> {
 
 export async function reload(): Promise<void> {
   cache = null
-  cache = USE_BLOB ? await loadFromBlob() : await loadFromDisk()
+  cache = USE_KV ? await loadFromKV() : USE_BLOB ? await loadFromBlob() : await loadFromDisk()
 }
