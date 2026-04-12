@@ -59,6 +59,21 @@ export async function POST(req: Request) {
           return obj
         })
         const records = transformRows(headers, keyed)
+
+        // ── Debug: return sample if 0 records parsed ─────────────────────────
+        if (records.length === 0 && rows.length > 0) {
+          const sample = keyed[0] ?? {}
+          return NextResponse.json({
+            ok: false,
+            error: [
+              `transformRows returned 0 records from ${rows.length} rows.`,
+              `Headers (first 6): ${JSON.stringify(headers.slice(0, 6))}`,
+              `First row values (first 6): ${JSON.stringify(rows[0]?.slice(0, 6))}`,
+              `First keyed row (first 6 keys): ${JSON.stringify(Object.entries(sample).slice(0, 6))}`,
+            ].join(' | '),
+          }, { status: 400 })
+        }
+
         const result  = await appendRecords(records, { filename })
 
         return NextResponse.json({
