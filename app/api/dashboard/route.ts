@@ -20,6 +20,10 @@ import {
   yearComparison,
   quarterComparison,
   monthComparison,
+  customerGroupRanking,
+  customerGroupMonthlyTrend,
+  documentTypeBreakdown,
+  revenueWaterfall,
 } from '@/lib/calculations/aggregations'
 import { generateInsights } from '@/lib/insights/insightGenerator'
 import {
@@ -52,6 +56,19 @@ export async function POST(req: Request) {
   const branches = branchRanking(filtered, metric)
   const topBranches = branches.slice(0, 6).map((b) => b.name)
 
+  // Revenue waterfall: compare last two years in the filtered set
+  const filteredYears = [...new Set(filtered.map((r) => r.year))].sort((a, b) => a - b)
+  let waterfallData = null
+  let waterfallLabel = { prev: '', curr: '' }
+  if (filteredYears.length >= 2) {
+    const prevYear = filteredYears[filteredYears.length - 2]
+    const currYear = filteredYears[filteredYears.length - 1]
+    const prevRecords = filtered.filter((r) => r.year === prevYear)
+    const currRecords = filtered.filter((r) => r.year === currYear)
+    waterfallData  = revenueWaterfall(prevRecords, currRecords, metric)
+    waterfallLabel = { prev: String(prevYear), curr: String(currYear) }
+  }
+
   return NextResponse.json({
     recordCount: filtered.length,
     totalRecords: allRecords.length,
@@ -76,5 +93,11 @@ export async function POST(req: Request) {
     monthComparison: monthComparison(filtered, metric),
     allYears,
     insights: generateInsights(filtered, kpis, filters),
+    customerGroups:       customerGroupRanking(filtered, metric),
+    customerGroupTrend:   customerGroupMonthlyTrend(filtered, metric, 6),
+    topCustomerGroups:    customerGroupRanking(filtered, metric).slice(0, 6).map((g) => g.name),
+    docTypes:             documentTypeBreakdown(filtered, metric),
+    waterfallData,
+    waterfallLabel,
   })
 }

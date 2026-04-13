@@ -2,16 +2,17 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { BarChart3, Users, Database, Upload, Menu, X, Search, ArrowLeftRight } from 'lucide-react'
+import { BarChart3, Users, Database, Upload, Menu, X, Search, ArrowLeftRight, FlaskConical } from 'lucide-react'
 import { useState } from 'react'
 
 const NAV = [
-  { href: '/',           label: 'Overview',    icon: BarChart3 },
-  { href: '/customers',  label: 'Customers',   icon: Users },
-  { href: '/customer-lookup', label: 'Lookup', icon: Search },
-  { href: '/comparison', label: 'Compare',     icon: ArrowLeftRight },
-  { href: '/raw',        label: 'Raw Data',    icon: Database },
-  { href: '/admin/import', label: 'Admin',     icon: Upload },
+  { href: '/',                 label: 'Overview',  icon: BarChart3 },
+  { href: '/customers',        label: 'Customers', icon: Users },
+  { href: '/customer-lookup',  label: 'Lookup',    icon: Search },
+  { href: '/test-analytics',   label: 'Tests',     icon: FlaskConical },
+  { href: '/comparison',       label: 'Compare',   icon: ArrowLeftRight },
+  { href: '/raw',              label: 'Raw Data',  icon: Database },
+  { href: '/admin/import',     label: 'Admin',     icon: Upload },
 ]
 
 export function TopNav() {
