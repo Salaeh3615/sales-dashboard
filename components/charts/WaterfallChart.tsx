@@ -8,37 +8,17 @@
  */
 
 import {
-  ResponsiveContainer,
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  Cell,
-  ReferenceLine,
+  ResponsiveContainer, BarChart, Bar, XAxis, YAxis,
+  CartesianGrid, Tooltip, Cell, ReferenceLine,
 } from 'recharts'
 import type { WaterfallBar } from '@/lib/calculations/aggregations'
-
-function fmt(n: number): string {
-  const abs = Math.abs(n)
-  if (abs >= 1_000_000) return `฿${(n / 1_000_000).toFixed(2)}M`
-  if (abs >= 1_000) return `฿${(n / 1_000).toFixed(1)}K`
-  return `฿${n.toFixed(0)}`
-}
-
-function fmtY(v: number) {
-  const abs = Math.abs(v)
-  if (abs >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`
-  if (abs >= 1_000) return `${(v / 1_000).toFixed(0)}K`
-  return String(v)
-}
+import { CLT_AXIS, fmtY, fmtCurrency } from '@/lib/chartTheme'
 
 const TYPE_COLORS: Record<WaterfallBar['type'], string> = {
-  base:     '#64748b',
-  positive: '#10b981',
-  negative: '#ef4444',
-  total:    '#3b82f6',
+  base:     '#0a3d2a', // emerald 900 (baseline)
+  positive: '#10b981', // emerald (growth)
+  negative: '#ef4444', // red (decline)
+  total:    '#FFCC00', // gold (current total)
 }
 
 type CustomTooltipProps = {
@@ -51,10 +31,15 @@ function CustomTooltip({ active, payload }: CustomTooltipProps) {
   const d = payload[0].payload
   const sign = d.type === 'negative' ? '' : d.type === 'positive' ? '+' : ''
   return (
-    <div className="bg-white border border-slate-200 rounded-lg p-3 shadow-md text-xs">
-      <p className="font-semibold text-slate-700 mb-1">{d.label}</p>
-      <p className={d.type === 'negative' ? 'text-red-600' : d.type === 'positive' ? 'text-emerald-600' : 'text-slate-700'}>
-        {sign}{fmt(d.value)}
+    <div className="bg-white border border-slate-200 rounded-xl p-3 shadow-card text-xs">
+      <p className="font-semibold text-navy-900 mb-1">{d.label}</p>
+      <p className={
+        d.type === 'negative' ? 'text-red-600'
+        : d.type === 'positive' ? 'text-emerald-600'
+        : d.type === 'total' ? 'text-gold-600 font-semibold'
+        : 'text-navy-900'
+      }>
+        {sign}{fmtCurrency(d.value)}
       </p>
     </div>
   )
@@ -75,23 +60,23 @@ export function WaterfallChart({ data }: { data: WaterfallBar[] }) {
   })
 
   return (
-    <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5">
-      <p className="text-sm font-semibold text-slate-700 mb-1">Revenue Bridge Analysis</p>
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-card p-5 hover-lift">
+      <p className="text-sm font-semibold text-navy-900 mb-1">Revenue Bridge Analysis</p>
       <p className="text-xs text-slate-400 mb-4">What drove the change between periods</p>
       <ResponsiveContainer width="100%" height={300}>
         <BarChart data={chartData} margin={{ top: 10, right: 10, bottom: 5, left: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+          <CartesianGrid strokeDasharray="3 3" stroke={CLT_AXIS.grid} vertical={false} />
           <XAxis
             dataKey="label"
             tick={{ fontSize: 11, fill: '#64748b' }}
-            tickLine={false}
-            axisLine={false}
+            tickLine={CLT_AXIS.tickLine}
+            axisLine={CLT_AXIS.axisLine}
           />
           <YAxis
             tickFormatter={fmtY}
-            tick={{ fontSize: 11, fill: '#94a3b8' }}
-            tickLine={false}
-            axisLine={false}
+            tick={CLT_AXIS.tick}
+            tickLine={CLT_AXIS.tickLine}
+            axisLine={CLT_AXIS.axisLine}
             width={58}
           />
           <Tooltip content={<CustomTooltip />} />
@@ -99,7 +84,7 @@ export function WaterfallChart({ data }: { data: WaterfallBar[] }) {
           {/* Invisible spacer bar */}
           <Bar dataKey="spacer" stackId="a" fill="transparent" />
           {/* Visible colored bar */}
-          <Bar dataKey="barValue" stackId="a" radius={[4, 4, 0, 0]}>
+          <Bar dataKey="barValue" stackId="a" radius={[6, 6, 0, 0]}>
             {chartData.map((d, i) => (
               <Cell key={i} fill={TYPE_COLORS[d.type]} />
             ))}

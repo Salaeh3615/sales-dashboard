@@ -17,6 +17,7 @@ import {
   customerGroupMonthlyTrend,
   documentTypeBreakdown,
 } from '@/lib/calculations/aggregations'
+import { paretoAnalysis } from '@/lib/calculations/insights'
 import type { DashboardFilters } from '@/types'
 
 export const dynamic = 'force-dynamic'
@@ -64,5 +65,6 @@ export async function POST(req: Request) {
     customerGroupTrend:  customerGroupMonthlyTrend(filtered, metric, 6),
     topCustomerGroups:   customerGroupRanking(filtered, metric).slice(0, 6).map((g) => g.name),
     docTypes:      documentTypeBreakdown(filtered, metric),
+    pareto:        paretoAnalysis(filtered, metric, 'testCode', 25),
   })
 }

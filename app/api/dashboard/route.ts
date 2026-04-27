@@ -30,6 +30,7 @@ import {
   buildCustomerProfiles,
   classifyAll,
 } from '@/lib/calculations/customerClassification'
+import { dailyRevenue, runRate } from '@/lib/calculations/insights'
 import type { DashboardFilters } from '@/types'
 
 export const dynamic = 'force-dynamic'
@@ -99,5 +100,7 @@ export async function POST(req: Request) {
     docTypes:             documentTypeBreakdown(filtered, metric),
     waterfallData,
     waterfallLabel,
+    daily:    dailyRevenue(filtered, metric),
+    runRate:  runRate(filtered, metric),
   })
 }

@@ -2,15 +2,10 @@
 
 import type { TimePoint } from '@/types'
 import {
-  ResponsiveContainer,
-  AreaChart,
-  Area,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  Legend,
+  ResponsiveContainer, AreaChart, Area,
+  XAxis, YAxis, CartesianGrid, Tooltip,
 } from 'recharts'
+import { CLT_AXIS, CLT_TOOLTIP, fmtY, fmtCurrency } from '@/lib/chartTheme'
 
 interface RevenueChartProps {
   monthly: TimePoint[]
@@ -18,28 +13,10 @@ interface RevenueChartProps {
   yearly: TimePoint[]
 }
 
-function fmtY(v: number): string {
-  if (Math.abs(v) >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`
-  if (Math.abs(v) >= 1_000) return `${(v / 1_000).toFixed(0)}K`
-  return String(v)
-}
-
-function fmtTooltip(v: number | string): string {
-  const n = Number(v)
-  if (isNaN(n)) return String(v)
-  return `฿${n.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`
-}
-
-function ChartCard({
-  title,
-  children,
-}: {
-  title: string
-  children: React.ReactNode
-}) {
+function ChartCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5">
-      <p className="text-sm font-semibold text-slate-700 mb-4">{title}</p>
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-card p-5 hover-lift">
+      <p className="text-sm font-semibold text-navy-900 mb-4">{title}</p>
       {children}
     </div>
   )
@@ -48,126 +25,56 @@ function ChartCard({
 export function RevenueChart({ monthly, quarterly, yearly }: RevenueChartProps) {
   return (
     <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-      {/* Monthly trend */}
       <ChartCard title="Monthly Revenue Trend">
         <ResponsiveContainer width="100%" height={220}>
           <AreaChart data={monthly} margin={{ top: 5, right: 10, bottom: 5, left: 0 }}>
             <defs>
-              <linearGradient id="gradBlue" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.25} />
-                <stop offset="95%" stopColor="#3b82f6" stopOpacity={0} />
+              <linearGradient id="gradNavy" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%"  stopColor="#0a3d2a" stopOpacity={0.28} />
+                <stop offset="95%" stopColor="#0a3d2a" stopOpacity={0} />
               </linearGradient>
             </defs>
-            <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-            <XAxis
-              dataKey="label"
-              tick={{ fontSize: 11, fill: '#94a3b8' }}
-              interval="preserveStartEnd"
-              tickLine={false}
-              axisLine={false}
-            />
-            <YAxis
-              tickFormatter={fmtY}
-              tick={{ fontSize: 11, fill: '#94a3b8' }}
-              tickLine={false}
-              axisLine={false}
-              width={55}
-            />
-            <Tooltip
-              formatter={(v) => [fmtTooltip(v as number), 'Revenue']}
-              contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e2e8f0' }}
-            />
-            <Area
-              type="monotone"
-              dataKey="revenue"
-              stroke="#3b82f6"
-              strokeWidth={2}
-              fill="url(#gradBlue)"
-              dot={false}
-              activeDot={{ r: 4 }}
-            />
+            <CartesianGrid strokeDasharray="3 3" stroke={CLT_AXIS.grid} />
+            <XAxis dataKey="label" tick={CLT_AXIS.tick} tickLine={CLT_AXIS.tickLine} axisLine={CLT_AXIS.axisLine} interval="preserveStartEnd" />
+            <YAxis tickFormatter={fmtY} tick={CLT_AXIS.tick} tickLine={CLT_AXIS.tickLine} axisLine={CLT_AXIS.axisLine} width={55} />
+            <Tooltip formatter={(v) => [fmtCurrency(v as number), 'Revenue']} {...CLT_TOOLTIP} />
+            <Area type="monotone" dataKey="revenue" stroke="#0a3d2a" strokeWidth={2.5} fill="url(#gradNavy)" dot={false} activeDot={{ r: 4, fill: '#0a3d2a' }} />
           </AreaChart>
         </ResponsiveContainer>
       </ChartCard>
 
-      {/* Quarterly trend */}
       <ChartCard title="Quarterly Revenue Trend">
         <ResponsiveContainer width="100%" height={220}>
           <AreaChart data={quarterly} margin={{ top: 5, right: 10, bottom: 5, left: 0 }}>
             <defs>
-              <linearGradient id="gradViolet" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="#7c3aed" stopOpacity={0.25} />
-                <stop offset="95%" stopColor="#7c3aed" stopOpacity={0} />
+              <linearGradient id="gradGold" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%"  stopColor="#FFCC00" stopOpacity={0.35} />
+                <stop offset="95%" stopColor="#FFCC00" stopOpacity={0} />
               </linearGradient>
             </defs>
-            <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-            <XAxis
-              dataKey="label"
-              tick={{ fontSize: 11, fill: '#94a3b8' }}
-              tickLine={false}
-              axisLine={false}
-            />
-            <YAxis
-              tickFormatter={fmtY}
-              tick={{ fontSize: 11, fill: '#94a3b8' }}
-              tickLine={false}
-              axisLine={false}
-              width={55}
-            />
-            <Tooltip
-              formatter={(v) => [fmtTooltip(v as number), 'Revenue']}
-              contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e2e8f0' }}
-            />
-            <Area
-              type="monotone"
-              dataKey="revenue"
-              stroke="#7c3aed"
-              strokeWidth={2}
-              fill="url(#gradViolet)"
-              dot={false}
-              activeDot={{ r: 4 }}
-            />
+            <CartesianGrid strokeDasharray="3 3" stroke={CLT_AXIS.grid} />
+            <XAxis dataKey="label" tick={CLT_AXIS.tick} tickLine={CLT_AXIS.tickLine} axisLine={CLT_AXIS.axisLine} />
+            <YAxis tickFormatter={fmtY} tick={CLT_AXIS.tick} tickLine={CLT_AXIS.tickLine} axisLine={CLT_AXIS.axisLine} width={55} />
+            <Tooltip formatter={(v) => [fmtCurrency(v as number), 'Revenue']} {...CLT_TOOLTIP} />
+            <Area type="monotone" dataKey="revenue" stroke="#d9a900" strokeWidth={2.5} fill="url(#gradGold)" dot={false} activeDot={{ r: 4, fill: '#FFCC00' }} />
           </AreaChart>
         </ResponsiveContainer>
       </ChartCard>
 
-      {/* Yearly overview */}
       <ChartCard title="Annual Revenue">
         <ResponsiveContainer width="100%" height={220}>
           <AreaChart data={yearly} margin={{ top: 5, right: 10, bottom: 5, left: 0 }}>
             <defs>
-              <linearGradient id="gradTeal" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="#0d9488" stopOpacity={0.25} />
-                <stop offset="95%" stopColor="#0d9488" stopOpacity={0} />
+              <linearGradient id="gradAnnual" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%"   stopColor="#0a3d2a" stopOpacity={0.3} />
+                <stop offset="100%" stopColor="#FFCC00" stopOpacity={0.1} />
               </linearGradient>
             </defs>
-            <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-            <XAxis
-              dataKey="label"
-              tick={{ fontSize: 12, fill: '#94a3b8' }}
-              tickLine={false}
-              axisLine={false}
-            />
-            <YAxis
-              tickFormatter={fmtY}
-              tick={{ fontSize: 11, fill: '#94a3b8' }}
-              tickLine={false}
-              axisLine={false}
-              width={55}
-            />
-            <Tooltip
-              formatter={(v) => [fmtTooltip(v as number), 'Revenue']}
-              contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e2e8f0' }}
-            />
-            <Area
-              type="monotone"
-              dataKey="revenue"
-              stroke="#0d9488"
-              strokeWidth={2.5}
-              fill="url(#gradTeal)"
-              dot={{ r: 5, fill: '#0d9488', strokeWidth: 0 }}
-              activeDot={{ r: 6 }}
-            />
+            <CartesianGrid strokeDasharray="3 3" stroke={CLT_AXIS.grid} />
+            <XAxis dataKey="label" tick={{ ...CLT_AXIS.tick, fontSize: 12 }} tickLine={CLT_AXIS.tickLine} axisLine={CLT_AXIS.axisLine} />
+            <YAxis tickFormatter={fmtY} tick={CLT_AXIS.tick} tickLine={CLT_AXIS.tickLine} axisLine={CLT_AXIS.axisLine} width={55} />
+            <Tooltip formatter={(v) => [fmtCurrency(v as number), 'Revenue']} {...CLT_TOOLTIP} />
+            <Area type="monotone" dataKey="revenue" stroke="#0a3d2a" strokeWidth={2.5} fill="url(#gradAnnual)" dot={{ r: 5, fill: '#FFCC00', stroke: '#0a3d2a', strokeWidth: 2 }} activeDot={{ r: 6 }} />
           </AreaChart>
         </ResponsiveContainer>
       </ChartCard>

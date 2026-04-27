@@ -19,6 +19,7 @@ import {
   type CustomerProfile,
   type CustomerStatus,
 } from '@/lib/calculations/customerClassification'
+import { rfmAnalysis, salespersonBubble } from '@/lib/calculations/insights'
 import type { SalesRecord } from '@/types'
 
 export const dynamic = 'force-dynamic'
@@ -226,6 +227,10 @@ export async function POST(req: Request) {
   const lostRevenuePriorYear = breakdown.lost.reduce((s, p) => s + (p.revenueByYear.get(targetYear - 1) ?? 0), 0)
   const newRevenueThisYear   = breakdown.new.reduce((s, p)  => s + (p.revenueByYear.get(targetYear) ?? 0), 0)
 
+  // RFM + Salesperson bubble (use all records, net amount)
+  const rfm = rfmAnalysis(records, 'netAmount')
+  const bubble = salespersonBubble(records, 'netAmount')
+
   return NextResponse.json({
     targetYear, allYears,
     counts: {
@@ -254,5 +259,12 @@ export async function POST(req: Request) {
       lostCustomerList: m.lostCustomerList.map((p) => trimProfile(p, targetYear)),
     })),
     salespersonPerformance: spPerf,
+    rfm: {
+      customers: rfm.customers
+        .sort((a, b) => b.monetary - a.monetary)
+        .slice(0, 400),
+      segmentSummary: rfm.segmentSummary,
+    },
+    salespersonBubble: bubble,
   })
 }
