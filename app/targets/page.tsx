@@ -424,7 +424,7 @@ function CumulativeChart({ data, anchorMonth }: { data: CumulativePoint[]; ancho
         <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
         <XAxis dataKey="label" {...CLT_AXIS} />
         <YAxis tickFormatter={fmtY} {...CLT_AXIS} />
-        <Tooltip {...CLT_TOOLTIP} formatter={(v: number | null, name: string) => v === null ? ['—', name] : [fmtCurrency(v), name]} />
+        <Tooltip {...CLT_TOOLTIP} formatter={(v, name) => v == null ? ['—', name as string] : [fmtCurrency(v as number), name as string]} />
         <Area type="monotone" dataKey="actualCumDisplay" name="Actual cum." stroke="#0a3d2a" strokeWidth={2.5}
           fill="url(#actualFill)" activeDot={{ r: 5 }} />
         <Line type="monotone" dataKey="targetCum" name="Target cum." stroke="#FFCC00" strokeWidth={2.5}

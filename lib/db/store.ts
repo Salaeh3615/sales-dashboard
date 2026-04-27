@@ -206,7 +206,6 @@ async function loadFromDb(): Promise<StoreShape> {
   // simultaneously (which is what previously caused OOM at ~1.3M rows).
   const stmt = d.prepare(`SELECT * FROM records ORDER BY postingDate`)
   const records: SalesRecord[] = []
-  // @ts-expect-error better-sqlite3 iterate() is typed loosely
   for (const row of stmt.iterate() as IterableIterator<RecordRow>) {
     records.push(rowToRecord(row))
   }

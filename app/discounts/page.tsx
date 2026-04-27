@@ -17,7 +17,7 @@ import {
 } from 'recharts'
 import type { DashboardFilters, FilterOptions } from '@/types'
 import { FilterPanel } from '@/components/filters/FilterPanel'
-import { CLT_COLORS, CLT_AXIS, CLT_TOOLTIP, fmtY, fmtCurrency } from '@/lib/chartTheme'
+import { CLT_COLORS, CLT_SINGLE, CLT_AXIS, CLT_TOOLTIP, fmtY, fmtCurrency } from '@/lib/chartTheme'
 import { Glossary } from '@/components/charts/Glossary'
 import { DISCOUNTS_GLOSSARY } from '@/lib/glossary-items'
 import type {
@@ -229,15 +229,15 @@ export default function DiscountsPage() {
                 label={{ value: 'Rate %', angle: 90, position: 'insideRight', fill: '#64748B', fontSize: 11 }}
               />
               <Tooltip
-                contentStyle={CLT_TOOLTIP}
+                {...CLT_TOOLTIP}
                 formatter={(value: number, name: string) => {
                   if (name === 'Discount rate') return [`${value.toFixed(2)}%`, name]
                   return [fmtCurrency(value), name]
                 }}
               />
               <Legend wrapperStyle={{ fontSize: '12px' }} />
-              <Bar yAxisId="left" dataKey="discountAmount" name="Discount amount" fill={CLT_COLORS.red} radius={[6, 6, 0, 0]} />
-              <Line yAxisId="right" type="monotone" dataKey="discountRate" name="Discount rate" stroke={CLT_COLORS.gold} strokeWidth={2.5} dot={{ r: 3 }} />
+              <Bar yAxisId="left" dataKey="discountAmount" name="Discount amount" fill={CLT_SINGLE.danger} radius={[6, 6, 0, 0]} />
+              <Line yAxisId="right" type="monotone" dataKey="discountRate" name="Discount rate" stroke={CLT_SINGLE.accent} strokeWidth={2.5} dot={{ r: 3 }} />
             </ComposedChart>
           </ResponsiveContainer>
         </div>
