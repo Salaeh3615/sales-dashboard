@@ -1,18 +1,17 @@
 /**
- * store.ts — Storage layer with three backends:
+ * store.ts — SQLite-backed storage layer.
  *
- *   KV     (Vercel prod, preferred) — Upstash Redis via @vercel/kv
- *                                     Env: KV_REST_API_URL + KV_REST_API_TOKEN
- *   BLOB   (Vercel prod, fallback)  — Vercel Blob (BLOB_READ_WRITE_TOKEN set)
- *   LOCAL  (dev / default)          — reads & writes files under ./data/
+ * ไฟล์เดียว: data/sales.db (portable — copy ไฟล์นี้เพื่อแจก DB ให้เครื่องอื่น)
  *
- * KV mode stores per-batch records as Redis keys:
- *   clt:batch:<id>   — NDJSON string of records for one import batch
- *   clt:batches      — JSON array of ImportBatch metadata
- *   clt:meta         — JSON object { totalRecords, rawAmountSum }
+ * Public API (unchanged from NDJSON version):
+ *   getStore, getAllRecords, getBatches, getDbMeta,
+ *   appendRecords, clearAll, reload, recordHash
  */
 
 import type { SalesRecord } from '@/types'
+import path from 'node:path'
+import fs from 'node:fs'
+import type DatabaseType from 'better-sqlite3'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -34,214 +33,197 @@ export type StoreShape = {
   batches: ImportBatch[]
 }
 
-// ─── Backend selection ────────────────────────────────────────────────────────
+// ─── File locations ───────────────────────────────────────────────────────────
 
-const USE_KV   = typeof process.env.KV_REST_API_URL   === 'string' && process.env.KV_REST_API_URL.length   > 0
-const USE_BLOB = !USE_KV &&
-                 typeof process.env.BLOB_READ_WRITE_TOKEN === 'string' &&
-                 process.env.BLOB_READ_WRITE_TOKEN.length > 0
+const DATA_DIR = path.join(process.cwd(), 'data')
+const DB_FILE  = path.join(DATA_DIR, 'sales.db')
 
-// ─── NDJSON parser ────────────────────────────────────────────────────────────
+function ensureDir() {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true })
+}
 
-function parseNdjsonBuffer(buf: Buffer): SalesRecord[] {
-  const records: SalesRecord[] = []
-  let start = 0
-  for (let i = 0; i <= buf.length; i++) {
-    if (i === buf.length || buf[i] === 10) {
-      if (i > start) {
-        const line = buf.slice(start, i).toString('utf-8').trim()
-        if (line) records.push(JSON.parse(line) as SalesRecord)
-      }
-      start = i + 1
-    }
+// ─── Lazy singleton DB connection ────────────────────────────────────────────
+
+let _db: DatabaseType.Database | null = null
+
+function db(): DatabaseType.Database {
+  if (_db) return _db
+  ensureDir()
+
+  // Dynamic require — better-sqlite3 is a native module; keep it out of webpack client bundles.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const Database = require('better-sqlite3') as typeof import('better-sqlite3')
+  _db = new Database(DB_FILE)
+  _db.pragma('journal_mode = WAL')
+  _db.pragma('synchronous = NORMAL')
+  _db.pragma('cache_size = -64000')  // 64MB cache
+  _db.pragma('temp_store = MEMORY')
+
+  initSchema(_db)
+  return _db
+}
+
+function initSchema(d: DatabaseType.Database) {
+  d.exec(`
+    CREATE TABLE IF NOT EXISTS records (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      postingDate       TEXT NOT NULL,
+      documentDate      TEXT,
+      orderDate         TEXT,
+      year              INTEGER NOT NULL,
+      quarter           TEXT NOT NULL,
+      month             TEXT NOT NULL,
+      monthNumber       INTEGER NOT NULL,
+      day               INTEGER,
+      branchCode        TEXT NOT NULL,
+      locationCode      TEXT,
+      documentNo        TEXT,
+      documentType      TEXT,
+      customerNo        TEXT,
+      customerCode      TEXT,
+      customerName      TEXT,
+      customerGroupCode TEXT,
+      customerGroupName TEXT,
+      salespersonCode   TEXT,
+      salespersonName   TEXT NOT NULL,
+      productCode       TEXT,
+      productDescription TEXT,
+      testCode          TEXT,
+      description       TEXT,
+      quantity          REAL,
+      unitPrice         REAL,
+      totalUnitPrice    REAL,
+      lineAmount        REAL,
+      discountAmount    REAL,
+      netAmount         REAL NOT NULL,
+      grossAmount       REAL,
+      batchId           TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_records_year         ON records(year);
+    CREATE INDEX IF NOT EXISTS idx_records_postingDate  ON records(postingDate);
+    CREATE INDEX IF NOT EXISTS idx_records_branch       ON records(branchCode);
+    CREATE INDEX IF NOT EXISTS idx_records_batchId      ON records(batchId);
+
+    CREATE TABLE IF NOT EXISTS batches (
+      id          TEXT PRIMARY KEY,
+      filename    TEXT NOT NULL,
+      importedAt  TEXT NOT NULL,
+      recordCount INTEGER NOT NULL,
+      createdAt   INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS meta (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+  `)
+}
+
+// ─── Row ⇄ SalesRecord mapping ───────────────────────────────────────────────
+
+type RecordRow = {
+  postingDate: string
+  documentDate: string | null
+  orderDate: string | null
+  year: number
+  quarter: string
+  month: string
+  monthNumber: number
+  day: number | null
+  branchCode: string
+  locationCode: string | null
+  documentNo: string | null
+  documentType: string | null
+  customerNo: string | null
+  customerCode: string | null
+  customerName: string | null
+  customerGroupCode: string | null
+  customerGroupName: string | null
+  salespersonCode: string | null
+  salespersonName: string
+  productCode: string | null
+  productDescription: string | null
+  testCode: string | null
+  description: string | null
+  quantity: number | null
+  unitPrice: number | null
+  totalUnitPrice: number | null
+  lineAmount: number | null
+  discountAmount: number | null
+  netAmount: number
+  grossAmount: number | null
+}
+
+function rowToRecord(r: RecordRow): SalesRecord {
+  const rec: SalesRecord = {
+    postingDate: r.postingDate,
+    year: r.year,
+    quarter: r.quarter,
+    month: r.month,
+    monthNumber: r.monthNumber,
+    branchCode: r.branchCode,
+    salespersonName: r.salespersonName,
+    netAmount: r.netAmount,
   }
-  return records
+  if (r.documentDate       !== null) rec.documentDate       = r.documentDate
+  if (r.orderDate          !== null) rec.orderDate          = r.orderDate
+  if (r.day                !== null) rec.day                = r.day
+  if (r.locationCode       !== null) rec.locationCode       = r.locationCode
+  if (r.documentNo         !== null) rec.documentNo         = r.documentNo
+  if (r.documentType       !== null) rec.documentType       = r.documentType
+  if (r.customerNo         !== null) rec.customerNo         = r.customerNo
+  if (r.customerCode       !== null) rec.customerCode       = r.customerCode
+  if (r.customerName       !== null) rec.customerName       = r.customerName
+  if (r.customerGroupCode  !== null) rec.customerGroupCode  = r.customerGroupCode
+  if (r.customerGroupName  !== null) rec.customerGroupName  = r.customerGroupName
+  if (r.salespersonCode    !== null) rec.salespersonCode    = r.salespersonCode
+  if (r.productCode        !== null) rec.productCode        = r.productCode
+  if (r.productDescription !== null) rec.productDescription = r.productDescription
+  if (r.testCode           !== null) rec.testCode           = r.testCode
+  if (r.description        !== null) rec.description        = r.description
+  if (r.quantity           !== null) rec.quantity           = r.quantity
+  if (r.unitPrice          !== null) rec.unitPrice          = r.unitPrice
+  if (r.totalUnitPrice     !== null) rec.totalUnitPrice     = r.totalUnitPrice
+  if (r.lineAmount         !== null) rec.lineAmount         = r.lineAmount
+  if (r.discountAmount     !== null) rec.discountAmount     = r.discountAmount
+  if (r.grossAmount        !== null) rec.grossAmount        = r.grossAmount
+  return rec
 }
 
-function parseNdjsonString(s: string): SalesRecord[] {
-  return s.split('\n').filter(l => l.trim()).map(l => JSON.parse(l) as SalesRecord)
-}
-
-// ─── KV helpers (Upstash / @vercel/kv) ───────────────────────────────────────
-// Uses only get / set / del — all "Simple Commands", no scan/keys/list calls.
-
-const K = {
-  batches:   'clt:batches',
-  meta:      'clt:meta',
-  batch: (id: string) => `clt:batch:${id}`,
-} as const
-
-/**
- * kvGet — always returns a JSON string (or null).
- * @vercel/kv auto-deserializes stored values, so we may receive an object
- * instead of the raw string.  Re-stringify if needed so callers can always
- * do JSON.parse() safely.
- */
-async function kvGet(key: string): Promise<string | null> {
-  const { kv } = await import('@vercel/kv')
-  const val = await kv.get(key)
-  if (val === null || val === undefined) return null
-  if (typeof val === 'string') return val
-  return JSON.stringify(val)   // already deserialized → re-stringify
-}
-
-async function kvSet(key: string, value: string): Promise<void> {
-  const { kv } = await import('@vercel/kv')
-  await kv.set(key, value)
-}
-
-async function kvDel(...keys: string[]): Promise<void> {
-  if (keys.length === 0) return
-  const { kv } = await import('@vercel/kv')
-  await kv.del(...keys as [string, ...string[]])
-}
-
-// ─── Blob helpers (fallback — see original for notes) ─────────────────────────
-
-const B = {
-  batchFile: (id: string) => `clt-db/batches/${id}.ndjson`,
-  batches:   'clt-db/batches.json',
-  meta:      'clt-db/meta.json',
-  init:      'clt-db/.init',
-} as const
-
-let _blobBase: string | null = null
-function extractBase(url: string): string | null {
-  const m = url.match(/^(https:\/\/[^/]+\.public\.blob\.vercel-storage\.com)/)
-  return m ? m[1] : null
-}
-async function getBlobBase(): Promise<string> {
-  if (_blobBase) return _blobBase
-  const { put } = await import('@vercel/blob')
-  const r = await put(B.init, '1', { access: 'public', addRandomSuffix: false, allowOverwrite: true, contentType: 'text/plain' })
-  _blobBase = extractBase(r.url)
-  if (!_blobBase) throw new Error('Cannot derive Vercel Blob base URL')
-  return _blobBase
-}
-async function blobRead(pathname: string): Promise<string | null> {
-  const base = await getBlobBase()
-  try { const res = await fetch(`${base}/${pathname}?t=${Date.now()}`); return res.ok ? res.text() : null } catch { return null }
-}
-async function blobWrite(pathname: string, content: string): Promise<void> {
-  const { put } = await import('@vercel/blob')
-  const r = await put(pathname, content, { access: 'public', addRandomSuffix: false, allowOverwrite: true, contentType: 'text/plain; charset=utf-8' })
-  if (!_blobBase) _blobBase = extractBase(r.url)
-}
-async function blobWriteNdjson(pathname: string, records: SalesRecord[]): Promise<void> {
-  if (records.length === 0) return
-  await blobWrite(pathname, records.map(r => JSON.stringify(r)).join('\n') + '\n')
-}
-
-// ─── Local filesystem helpers ─────────────────────────────────────────────────
-
-import path from 'node:path'
-const DATA_DIR     = path.join(process.cwd(), 'data')
-const NDJSON_FILE  = path.join(DATA_DIR, 'records.ndjson')
-const BATCHES_FILE = path.join(DATA_DIR, 'batches.json')
-const META_FILE    = path.join(DATA_DIR, 'meta.json')
-const LEGACY_FILE  = path.join(DATA_DIR, 'records.json')
-
-async function localEnsureDir() {
-  const fs = await import('node:fs/promises')
-  await fs.mkdir(DATA_DIR, { recursive: true })
-}
-
-// ─── Singleton cache ──────────────────────────────────────────────────────────
+// ─── In-memory cache ──────────────────────────────────────────────────────────
 
 let cache: StoreShape | null = null
-const EMPTY_STORE: StoreShape = { version: 1, records: [], batches: [] }
+let loadPromise: Promise<StoreShape> | null = null
 
-// ─── Load ─────────────────────────────────────────────────────────────────────
+async function loadFromDb(): Promise<StoreShape> {
+  const d = db()
+  const batchRows = d.prepare(
+    `SELECT id, filename, importedAt, recordCount FROM batches ORDER BY createdAt`,
+  ).all() as ImportBatch[]
 
-async function loadFromKV(): Promise<StoreShape> {
-  const batchesRaw = await kvGet(K.batches)
-  const batches: ImportBatch[] = batchesRaw ? JSON.parse(batchesRaw) : []
-  if (batches.length === 0) return { version: 1, records: [], batches: [] }
-
-  const chunkSize = 10
-  const allRecords: SalesRecord[] = []
-  for (let i = 0; i < batches.length; i += chunkSize) {
-    const chunk = batches.slice(i, i + chunkSize)
-    const contents = await Promise.all(chunk.map(b => kvGet(K.batch(b.id))))
-    for (const c of contents) {
-      if (c) allRecords.push(...parseNdjsonString(c))
-    }
+  // Stream rows and map in chunks — avoids allocating the full row[] + records[]
+  // simultaneously (which is what previously caused OOM at ~1.3M rows).
+  const stmt = d.prepare(`SELECT * FROM records ORDER BY postingDate`)
+  const records: SalesRecord[] = []
+  for (const row of stmt.iterate() as IterableIterator<RecordRow>) {
+    records.push(rowToRecord(row))
   }
-  return { version: 1, records: allRecords, batches }
-}
-
-async function loadFromBlob(): Promise<StoreShape> {
-  const batchesRaw = await blobRead(B.batches)
-  const batches: ImportBatch[] = batchesRaw ? JSON.parse(batchesRaw) : []
-  if (batches.length === 0) return { version: 1, records: [], batches: [] }
-
-  const base = await getBlobBase()
-  const chunkSize = 10
-  const allRecords: SalesRecord[] = []
-  for (let i = 0; i < batches.length; i += chunkSize) {
-    const chunk = batches.slice(i, i + chunkSize)
-    const buffers = await Promise.all(
-      chunk.map(async b => {
-        try {
-          const res = await fetch(`${base}/${B.batchFile(b.id)}?t=${Date.now()}`)
-          return res.ok ? Buffer.from(await res.arrayBuffer()) : null
-        } catch { return null }
-      })
-    )
-    for (const buf of buffers) {
-      if (buf) allRecords.push(...parseNdjsonBuffer(buf))
-    }
-  }
-  return { version: 1, records: allRecords, batches }
-}
-
-async function loadFromDisk(): Promise<StoreShape> {
-  await localEnsureDir()
-  const fs = await import('node:fs/promises')
-  try { await fs.access(LEGACY_FILE); await fs.unlink(LEGACY_FILE).catch(() => {}) } catch { /* ok */ }
-
-  let records: SalesRecord[] = []
-  try { records = parseNdjsonBuffer(await fs.readFile(NDJSON_FILE)) }
-  catch (e: unknown) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e }
-
-  let batches: ImportBatch[] = []
-  try { batches = JSON.parse(await fs.readFile(BATCHES_FILE, 'utf-8')) as ImportBatch[] }
-  catch (e: unknown) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e }
-
-  return { version: 1, records, batches }
-}
-
-async function saveToDisk(store: StoreShape): Promise<void> {
-  await localEnsureDir()
-  const fs     = await import('node:fs/promises')
-  const fsSync = (await import('node:fs')).default
-  const ndjsonTmp = NDJSON_FILE + '.tmp'
-  await new Promise<void>((resolve, reject) => {
-    const ws = fsSync.createWriteStream(ndjsonTmp, { encoding: 'utf-8' })
-    ws.on('error', reject); ws.on('finish', resolve)
-    for (const rec of store.records) ws.write(JSON.stringify(rec) + '\n')
-    ws.end()
-  })
-  await fs.rename(ndjsonTmp, NDJSON_FILE)
-  const batchesTmp = BATCHES_FILE + '.tmp'
-  await fs.writeFile(batchesTmp, JSON.stringify(store.batches), 'utf-8')
-  await fs.rename(batchesTmp, BATCHES_FILE)
-  const meta: DbMeta = {
-    totalRecords: store.records.length,
-    rawAmountSum: store.records.reduce((s, r) => s + r.netAmount, 0),
-  }
-  const metaTmp = META_FILE + '.tmp'
-  await fs.writeFile(metaTmp, JSON.stringify(meta), 'utf-8')
-  await fs.rename(metaTmp, META_FILE)
+  return { version: 1, records, batches: batchRows }
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 export async function getStore(): Promise<StoreShape> {
-  if (!cache) {
-    cache = USE_KV ? await loadFromKV() : USE_BLOB ? await loadFromBlob() : await loadFromDisk()
+  if (cache) return cache
+  if (!loadPromise) {
+    loadPromise = loadFromDb().then((s) => {
+      cache = s
+      loadPromise = null
+      return s
+    })
   }
-  return cache
+  return loadPromise
 }
 
 export async function getAllRecords(): Promise<SalesRecord[]> {
@@ -249,36 +231,23 @@ export async function getAllRecords(): Promise<SalesRecord[]> {
 }
 
 export async function getBatches(): Promise<ImportBatch[]> {
-  if (USE_KV) {
-    const raw = await kvGet(K.batches)
-    return raw ? JSON.parse(raw) : []
-  }
-  return (await getStore()).batches
+  const d = db()
+  return d.prepare(
+    `SELECT id, filename, importedAt, recordCount FROM batches ORDER BY createdAt`,
+  ).all() as ImportBatch[]
 }
 
 export async function getDbMeta(): Promise<DbMeta> {
-  try {
-    if (USE_KV) {
-      const raw = await kvGet(K.meta)
-      if (raw) return JSON.parse(raw) as DbMeta
-    } else if (USE_BLOB) {
-      const raw = await blobRead(B.meta)
-      if (raw) return JSON.parse(raw) as DbMeta
-    } else {
-      const fs  = await import('node:fs/promises')
-      const raw = await fs.readFile(META_FILE, 'utf-8')
-      return JSON.parse(raw) as DbMeta
-    }
-  } catch { /* fall through */ }
-  const store = await getStore()
-  return {
-    totalRecords: store.records.length,
-    rawAmountSum: store.records.reduce((s, r) => s + r.netAmount, 0),
-  }
+  const d = db()
+  const row = d.prepare(
+    `SELECT COUNT(*) AS totalRecords, COALESCE(SUM(netAmount), 0) AS rawAmountSum FROM records`,
+  ).get() as { totalRecords: number; rawAmountSum: number }
+  return { totalRecords: row.totalRecords, rawAmountSum: row.rawAmountSum }
 }
 
 export function recordHash(r: SalesRecord): string {
-  return [r.postingDate, r.documentNo ?? '', r.documentType ?? '',
+  return [
+    r.postingDate, r.documentNo ?? '', r.documentType ?? '',
     r.customerNo ?? r.customerCode ?? '', r.salespersonCode ?? '',
     r.productCode ?? '', r.testCode ?? '', r.description ?? '', String(r.netAmount),
   ].join('|')
@@ -288,83 +257,104 @@ export async function appendRecords(
   newRecords: SalesRecord[],
   batchInfo: Omit<ImportBatch, 'id' | 'importedAt' | 'recordCount'>,
 ): Promise<{ inserted: number; skipped: number; batchId: string }> {
+  const d = db()
   const batchId = `batch-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
-  const batch: ImportBatch = {
-    id: batchId, filename: batchInfo.filename,
-    importedAt: new Date().toISOString(), recordCount: newRecords.length,
-  }
+  const importedAt = new Date().toISOString()
 
-  if (USE_KV) {
-    // 1. Store records as NDJSON string
-    if (newRecords.length > 0) {
-      await kvSet(K.batch(batchId), newRecords.map(r => JSON.stringify(r)).join('\n') + '\n')
+  const insertRecord = d.prepare(`
+    INSERT INTO records (
+      postingDate, documentDate, orderDate, year, quarter, month, monthNumber, day,
+      branchCode, locationCode, documentNo, documentType,
+      customerNo, customerCode, customerName, customerGroupCode, customerGroupName,
+      salespersonCode, salespersonName,
+      productCode, productDescription, testCode, description,
+      quantity, unitPrice, totalUnitPrice, lineAmount, discountAmount,
+      netAmount, grossAmount, batchId
+    ) VALUES (
+      @postingDate, @documentDate, @orderDate, @year, @quarter, @month, @monthNumber, @day,
+      @branchCode, @locationCode, @documentNo, @documentType,
+      @customerNo, @customerCode, @customerName, @customerGroupCode, @customerGroupName,
+      @salespersonCode, @salespersonName,
+      @productCode, @productDescription, @testCode, @description,
+      @quantity, @unitPrice, @totalUnitPrice, @lineAmount, @discountAmount,
+      @netAmount, @grossAmount, @batchId
+    )
+  `)
+
+  const insertBatch = d.prepare(`
+    INSERT INTO batches (id, filename, importedAt, recordCount, createdAt)
+    VALUES (?, ?, ?, ?, ?)
+  `)
+
+  const tx = d.transaction((records: SalesRecord[]) => {
+    for (const r of records) {
+      insertRecord.run({
+        postingDate:       r.postingDate,
+        documentDate:      r.documentDate        ?? null,
+        orderDate:         r.orderDate           ?? null,
+        year:              r.year,
+        quarter:           r.quarter,
+        month:             r.month,
+        monthNumber:       r.monthNumber,
+        day:               r.day                 ?? null,
+        branchCode:        r.branchCode,
+        locationCode:      r.locationCode        ?? null,
+        documentNo:        r.documentNo          ?? null,
+        documentType:      r.documentType        ?? null,
+        customerNo:        r.customerNo          ?? null,
+        customerCode:      r.customerCode        ?? null,
+        customerName:      r.customerName        ?? null,
+        customerGroupCode: r.customerGroupCode   ?? null,
+        customerGroupName: r.customerGroupName   ?? null,
+        salespersonCode:   r.salespersonCode     ?? null,
+        salespersonName:   r.salespersonName,
+        productCode:       r.productCode         ?? null,
+        productDescription: r.productDescription ?? null,
+        testCode:          r.testCode            ?? null,
+        description:       r.description         ?? null,
+        quantity:          r.quantity            ?? null,
+        unitPrice:         r.unitPrice           ?? null,
+        totalUnitPrice:    r.totalUnitPrice      ?? null,
+        lineAmount:        r.lineAmount          ?? null,
+        discountAmount:    r.discountAmount      ?? null,
+        netAmount:         r.netAmount,
+        grossAmount:       r.grossAmount         ?? null,
+        batchId,
+      })
     }
-    // 2. Update batches list
-    const batchesRaw = await kvGet(K.batches)
-    const batches: ImportBatch[] = batchesRaw ? JSON.parse(batchesRaw) : []
-    batches.push(batch)
-    await kvSet(K.batches, JSON.stringify(batches))
-    // 3. Update meta
-    const currentMeta = await getDbMeta()
-    await kvSet(K.meta, JSON.stringify({
-      totalRecords: currentMeta.totalRecords + newRecords.length,
-      rawAmountSum: currentMeta.rawAmountSum + newRecords.reduce((s, r) => s + r.netAmount, 0),
-    }))
-    cache = null
+    insertBatch.run(batchId, batchInfo.filename, importedAt, records.length, Date.now())
+  })
 
-  } else if (USE_BLOB) {
-    if (newRecords.length > 0) await blobWriteNdjson(B.batchFile(batchId), newRecords)
-    const batchesRaw = await blobRead(B.batches)
-    const batches: ImportBatch[] = batchesRaw ? JSON.parse(batchesRaw) : []
-    batches.push(batch)
-    await blobWrite(B.batches, JSON.stringify(batches))
-    const currentMeta = await getDbMeta()
-    await blobWrite(B.meta, JSON.stringify({
-      totalRecords: currentMeta.totalRecords + newRecords.length,
-      rawAmountSum: currentMeta.rawAmountSum + newRecords.reduce((s, r) => s + r.netAmount, 0),
-    }))
-    cache = null
-
-  } else {
-    const store = await getStore()
-    for (const r of newRecords) store.records.push(r)
-    store.records.sort((a, b) => a.postingDate.localeCompare(b.postingDate))
-    store.batches.push(batch)
-    await saveToDisk(store)
-    cache = store
-  }
+  tx(newRecords)
+  cache = null
 
   return { inserted: newRecords.length, skipped: 0, batchId }
 }
 
 export async function clearAll(): Promise<void> {
-  if (USE_KV) {
-    const batchesRaw = await kvGet(K.batches)
-    const batches: ImportBatch[] = batchesRaw ? JSON.parse(batchesRaw) : []
-    const keys = [K.batches, K.meta, ...batches.map(b => K.batch(b.id))]
-    if (keys.length > 0) await kvDel(...keys)
-
-  } else if (USE_BLOB) {
-    const { del } = await import('@vercel/blob')
-    const base = await getBlobBase()
-    try {
-      const batchesRaw = await blobRead(B.batches)
-      const batches: ImportBatch[] = batchesRaw ? JSON.parse(batchesRaw) : []
-      if (batches.length > 0) {
-        const urls = batches.map(b => `${base}/${B.batchFile(b.id)}`)
-        for (let i = 0; i < urls.length; i += 100) await del(urls.slice(i, i + 100)).catch(() => {})
-      }
-    } catch (e) { console.warn('[clearAll] blob delete failed (non-fatal):', e) }
-    await Promise.all([blobWrite(B.batches, '[]'), blobWrite(B.meta, JSON.stringify({ totalRecords: 0, rawAmountSum: 0 }))])
-
-  } else {
-    cache = { ...EMPTY_STORE }
-    await saveToDisk(cache)
-  }
+  const d = db()
+  d.exec(`DELETE FROM records; DELETE FROM batches; DELETE FROM meta;`)
+  d.exec(`VACUUM;`)
   cache = null
+}
+
+export async function clearBatch(batchId: string): Promise<{ deletedRecords: number; deletedBatch: boolean }> {
+  const d = db()
+  const tx = d.transaction((id: string) => {
+    const recDel   = d.prepare(`DELETE FROM records WHERE batchId = ?`).run(id)
+    const batchDel = d.prepare(`DELETE FROM batches WHERE id = ?`).run(id)
+    return {
+      deletedRecords: recDel.changes as number,
+      deletedBatch:   (batchDel.changes as number) > 0,
+    }
+  })
+  const result = tx(batchId)
+  cache = null
+  return result
 }
 
 export async function reload(): Promise<void> {
   cache = null
-  cache = USE_KV ? await loadFromKV() : USE_BLOB ? await loadFromBlob() : await loadFromDisk()
+  loadPromise = null
+  cache = await loadFromDb()
 }

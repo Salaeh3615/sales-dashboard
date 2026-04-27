@@ -1,7 +1,7 @@
 'use client'
 
 import { DashboardFilters, FilterOptions, RevenueMetric } from '@/types'
-import { ChevronDown, ChevronUp, X } from 'lucide-react'
+import { ChevronDown, ChevronUp, X, SlidersHorizontal } from 'lucide-react'
 import { useState } from 'react'
 
 interface FilterPanelProps {
@@ -33,15 +33,15 @@ function MultiSelect({
   const isAll = selected.length === 0
 
   return (
-    <div className="space-y-1">
-      <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">{label}</p>
+    <div className="space-y-1.5">
+      <p className="text-[10px] font-semibold text-navy-700 uppercase tracking-wider">{label}</p>
       <div className="flex flex-wrap gap-1.5">
         <button
           onClick={() => onChange([])}
-          className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+          className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-all ${
             isAll
-              ? 'bg-blue-600 text-white border-blue-600'
-              : 'bg-white text-slate-600 border-slate-200 hover:border-blue-400'
+              ? 'bg-navy-900 text-gold-400 border-navy-900 shadow-sm'
+              : 'bg-white text-slate-600 border-slate-200 hover:border-navy-400 hover:text-navy-900'
           }`}
         >
           All
@@ -52,10 +52,10 @@ function MultiSelect({
             <button
               key={opt.value}
               onClick={() => toggle(opt.value)}
-              className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+              className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-all ${
                 active
-                  ? 'bg-blue-600 text-white border-blue-600'
-                  : 'bg-white text-slate-600 border-slate-200 hover:border-blue-400'
+                  ? 'bg-navy-900 text-gold-400 border-navy-900 shadow-sm'
+                  : 'bg-white text-slate-600 border-slate-200 hover:border-navy-400 hover:text-navy-900'
               }`}
             >
               {opt.label}
@@ -107,14 +107,17 @@ export function FilterPanel({ options, filters, onChange }: FilterPanelProps) {
   ]
 
   return (
-    <aside className="w-72 shrink-0 bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
+    <aside className="w-72 shrink-0 bg-white border border-slate-200 rounded-2xl shadow-card overflow-hidden">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100">
-        <h2 className="text-sm font-semibold text-slate-800">Filters</h2>
+      <div className="flex items-center justify-between px-4 py-3 bg-gradient-to-r from-navy-900 to-navy-700">
+        <h2 className="text-sm font-semibold text-white flex items-center gap-2">
+          <SlidersHorizontal size={14} className="text-gold-400" />
+          Filters
+        </h2>
         {hasActiveFilters ? (
           <button
             onClick={clearAll}
-            className="flex items-center gap-1 text-xs text-red-500 hover:text-red-700 transition-colors"
+            className="flex items-center gap-1 text-xs text-gold-300 hover:text-gold-400 transition-colors"
           >
             <X size={12} /> Clear all
           </button>
@@ -122,17 +125,17 @@ export function FilterPanel({ options, filters, onChange }: FilterPanelProps) {
       </div>
 
       {/* Revenue metric selector */}
-      <div className="px-4 py-3 border-b border-slate-100 space-y-1">
-        <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Revenue metric</p>
+      <div className="px-4 py-3 border-b border-slate-100 space-y-1.5 bg-slate-50/60">
+        <p className="text-[10px] font-semibold text-navy-700 uppercase tracking-wider">Revenue metric</p>
         <div className="flex gap-1.5">
           {(['netAmount', 'grossAmount', 'lineAmount'] as RevenueMetric[]).map((m) => (
             <button
               key={m}
               onClick={() => setField('revenueMetric', m)}
-              className={`flex-1 py-1 rounded text-xs font-medium border transition-colors ${
+              className={`flex-1 py-1.5 rounded-md text-xs font-medium border transition-all ${
                 filters.revenueMetric === m
-                  ? 'bg-blue-600 text-white border-blue-600'
-                  : 'bg-white text-slate-600 border-slate-200 hover:border-blue-400'
+                  ? 'bg-navy-900 text-gold-400 border-navy-900 shadow-sm'
+                  : 'bg-white text-slate-600 border-slate-200 hover:border-navy-400 hover:text-navy-900'
               }`}
             >
               {m === 'netAmount' ? 'Net' : m === 'grossAmount' ? 'Gross' : 'Line'}
@@ -235,13 +238,15 @@ function Section({
   children: React.ReactNode
 }) {
   return (
-    <div className="border-b border-slate-100">
+    <div className="border-b border-slate-100 last:border-b-0">
       <button
         onClick={onToggle}
-        className="w-full flex items-center justify-between px-4 py-2.5 text-left hover:bg-slate-50 transition-colors"
+        className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-navy-50/50 transition-colors"
       >
-        <span className="text-sm font-medium text-slate-700">{title}</span>
-        {open ? <ChevronUp size={14} className="text-slate-400" /> : <ChevronDown size={14} className="text-slate-400" />}
+        <span className="text-sm font-semibold text-navy-900">{title}</span>
+        {open
+          ? <ChevronUp size={14} className="text-navy-600" />
+          : <ChevronDown size={14} className="text-slate-400" />}
       </button>
       {open && <div className="px-4 pb-4 space-y-4">{children}</div>}
     </div>

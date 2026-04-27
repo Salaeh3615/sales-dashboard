@@ -12,14 +12,14 @@
  *   3. FormData { files, replace }  — local dev
  *
  * GET    — DB stats + blobMode flag
- * DELETE — wipe database
+ * DELETE — ?batchId=… ลบเฉพาะ batch นั้น · ไม่มี param ลบทั้งหมด
  */
 
 import { NextResponse } from 'next/server'
 import { parseFileBuffer } from '@/lib/data-loader/serverLoader'
 import { transformRows } from '@/lib/transformers/recordTransformer'
 import type { RawRow } from '@/types'
-import { appendRecords, clearAll, getBatches, getDbMeta } from '@/lib/db/store'
+import { appendRecords, clearAll, clearBatch, getBatches, getDbMeta } from '@/lib/db/store'
 
 export const dynamic    = 'force-dynamic'
 export const runtime    = 'nodejs'
@@ -146,7 +146,18 @@ export async function GET() {
 
 // ─── DELETE ───────────────────────────────────────────────────────────────────
 
-export async function DELETE() {
+export async function DELETE(req: Request) {
+  const url = new URL(req.url)
+  const batchId = url.searchParams.get('batchId')
+
+  if (batchId) {
+    const result = await clearBatch(batchId)
+    if (!result.deletedBatch) {
+      return NextResponse.json({ error: 'batch not found' }, { status: 404 })
+    }
+    return NextResponse.json({ ok: true, ...result })
+  }
+
   await clearAll()
   return NextResponse.json({ ok: true })
 }

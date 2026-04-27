@@ -12,20 +12,6 @@
  *  - Revenue validation: shows whether the DB total matches calculated totals
  *  - Import history with per-batch record counts
  *  - Shareable viewer / admin URLs
- *
- * ⚠ Deduplication note
- * ---------------------
- * Each record is fingerprinted by:
- *   postingDate | documentNo | documentType | customerNo | salespersonCode |
- *   productCode | testCode | description | netAmount
- *
- * Re-importing the same file → all records skipped (inserted = 0).
- * Importing a new file      → all new records inserted.
- *
- * If you previously imported files before April 2026 (old hash used only
- * documentNo + productCode + testCode + postingDate + netAmount), some
- * line-items with the same price may have been lost.  To fix: click
- * "Clear database" then re-import all source files.
  */
 
 import { useEffect, useRef, useState } from 'react'
@@ -37,8 +23,6 @@ import * as PapaModule from 'papaparse'
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const Papa: typeof import('papaparse') = (PapaModule as any).default ?? PapaModule
 
-// Mirror of server-side detectHeaderRowIndex — finds the real column header row
-// (CSV files often have title/intro rows before the actual headers)
 const HEADER_KEYWORDS = [
   'shortcut dimension 1 code', 'posting date', 'salesperson code',
   'bill-to name', 'sale person name', 'amount',
@@ -85,8 +69,6 @@ type ValidationGroup = {
   results: ValidationResult[]
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
 function fmtMoney(n: number) {
   if (Math.abs(n) >= 1_000_000) return `฿${(n / 1_000_000).toFixed(4)}M`
   return `฿${n.toLocaleString('en', { minimumFractionDigits: 2 })}`
@@ -108,8 +90,8 @@ export default function AdminImportPage() {
   const [origin, setOrigin]   = useState('https://your-app.vercel.app')
   const [blobMode, setBlobMode] = useState(false)
   const [uploadProgress, setUploadProgress] = useState('')
+  const [deletingId, setDeletingId] = useState<string | null>(null)
 
-  // ── Load DB stats on mount ──────────────────────────────────────────────────
   const refreshStats = async () => {
     try {
       const res = await fetch('/api/import')
@@ -130,7 +112,6 @@ export default function AdminImportPage() {
     setOrigin(window.location.origin)
   }, [])
 
-  // ── Upload ─────────────────────────────────────────────────────────────────
   const upload = async (files: FileList | File[] | null) => {
     if (!files || (files as FileList).length === 0) return
     setLoading(true)
@@ -142,9 +123,8 @@ export default function AdminImportPage() {
     try {
       const fileArr = Array.from(files)
 
-      // ── Blob mode (Vercel production): parse CSV in browser, send chunks ────
       if (blobMode) {
-        const CHUNK_ROWS = 100    // small chunks — safely under Vercel's 4.5 MB body limit
+        const CHUNK_ROWS = window.location.hostname === 'localhost' ? 5000 : 100
 
         let totalInserted = 0
         let totalSkipped  = 0
@@ -153,7 +133,6 @@ export default function AdminImportPage() {
         for (let fi = 0; fi < fileArr.length; fi++) {
           const file = fileArr[fi]
 
-          // 1. Parse CSV entirely in browser (runs locally, no upload needed)
           setUploadProgress(`กำลัง parse ไฟล์ ${fi + 1}/${fileArr.length}: ${file.name}…`)
 
           const parsed = await new Promise<{ headers: string[]; rows: string[][] }>((resolve, reject) => {
@@ -168,7 +147,6 @@ export default function AdminImportPage() {
                   ))
                   return
                 }
-                // Find real header row (file may have title/intro rows before headers)
                 const headerIdx = findHeaderRowIndex(all)
                 resolve({ headers: all[headerIdx] ?? [], rows: all.slice(headerIdx + 1) })
               },
@@ -180,7 +158,6 @@ export default function AdminImportPage() {
           setUploadProgress(`parse สำเร็จ: ${rows.length.toLocaleString()} rows — กำลังส่งข้อมูล…`)
           const totalChunks = Math.ceil(rows.length / CHUNK_ROWS)
 
-          // 2. Send in small chunks — each chunk is just a few hundred KB
           for (let ci = 0; ci < totalChunks; ci++) {
             const chunkRows = rows.slice(ci * CHUNK_ROWS, (ci + 1) * CHUNK_ROWS)
             const pct       = Math.round(((ci + 1) / totalChunks) * 100)
@@ -197,7 +174,6 @@ export default function AdminImportPage() {
                 headers,
                 rows:     chunkRows,
                 filename: file.name,
-                // clear DB only before the very first chunk of the first file
                 replace: fi === 0 && ci === 0 && replace,
               }),
             })
@@ -217,7 +193,6 @@ export default function AdminImportPage() {
         return
       }
 
-      // ── Local mode: send via FormData ────────────────────────────────────────
       const fd = new FormData()
       fileArr.forEach((f) => fd.append('files', f))
       if (replace) fd.append('replace', 'true')
@@ -239,7 +214,6 @@ export default function AdminImportPage() {
     }
   }
 
-  // ── Clear ──────────────────────────────────────────────────────────────────
   const handleClear = async () => {
     if (!confirm(
       'Delete ALL records from the database?\n\n' +
@@ -263,7 +237,29 @@ export default function AdminImportPage() {
     }
   }
 
-  // ── Run validation ─────────────────────────────────────────────────────────
+  const handleDeleteBatch = async (b: Batch) => {
+    if (!confirm(
+      `ลบไฟล์นี้ออกจากฐานข้อมูล?\n\n` +
+      `ไฟล์: ${b.filename}\n` +
+      `จำนวน: ${b.recordCount.toLocaleString()} records\n\n` +
+      `การลบนี้ย้อนกลับไม่ได้`,
+    )) return
+    setDeletingId(b.id)
+    setError(null)
+    try {
+      const res = await fetch(`/api/import?batchId=${encodeURIComponent(b.id)}`, { method: 'DELETE' })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error((data as { error?: string }).error ?? `Delete failed (${res.status})`)
+      }
+      await refreshStats()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Delete failed')
+    } finally {
+      setDeletingId(null)
+    }
+  }
+
   const runValidation = async () => {
     setValidating(true)
     setValidation(null)
@@ -282,43 +278,52 @@ export default function AdminImportPage() {
   const batches = stats?.batches ?? []
 
   return (
-    <main className="flex-1 p-4 lg:p-6 max-w-4xl mx-auto w-full space-y-6">
+    <main className="flex-1 bg-[#F8FAFC] p-4 lg:p-5 max-w-5xl mx-auto w-full space-y-5 animate-fade-in">
 
       {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold text-slate-800">Admin · Data Import</h1>
-        <p className="text-sm text-slate-500 mt-1">
-          Upload CSV or Excel files. Records are parsed, normalised, and stored.
-          Viewers see updated data immediately on refresh.
-        </p>
+      <div className="hero-card p-5">
+        <div className="relative flex items-center gap-3">
+          <span className="inline-flex w-10 h-10 rounded-xl bg-gradient-to-br from-gold-400/30 to-gold-500/10 backdrop-blur text-gold-300 items-center justify-center border border-gold-400/30 shadow-inner shrink-0">
+            <Upload size={18} strokeWidth={2.2} />
+          </span>
+          <div className="flex-1 min-w-0">
+            <h1 className="text-lg font-bold tracking-tight leading-tight">Admin · Data Import</h1>
+            <p className="text-xs text-navy-100/70 mt-0.5 tracking-wide">
+              Upload CSV or Excel files · records are parsed, normalised, and stored
+            </p>
+          </div>
+          <span className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/5 border border-white/10 text-[10px] font-semibold text-gold-300 tracking-wider uppercase">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            Live
+          </span>
+        </div>
       </div>
 
       {/* ── Database Stats ───────────────────────────────────────────────── */}
       {stats && (
-        <section className="bg-white rounded-xl border border-slate-200 shadow-sm p-5">
+        <section className="bg-white rounded-3xl border border-slate-200 shadow-luxe p-5 hover-lift">
           <div className="flex items-center gap-2 mb-4">
-            <Database size={16} className="text-blue-600" />
-            <h2 className="text-sm font-bold text-slate-800">Database Stats</h2>
+            <span className="inline-flex w-8 h-8 rounded-lg bg-navy-50 text-navy-900 items-center justify-center">
+              <Database size={14} />
+            </span>
+            <h2 className="text-sm font-bold text-navy-900">Database Stats</h2>
             <span className="ml-auto text-xs text-slate-400">
               Verify these totals against your source files
             </span>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <Stat label="Total Records" value={stats.recordCount.toLocaleString()} />
-            <Stat label="Raw Amount Sum" value={fmtMoney(stats.rawAmountSum)}
+            <Stat label="Total Records" value={stats.recordCount.toLocaleString()} tone="navy" />
+            <Stat label="Raw Amount Sum" value={fmtMoney(stats.rawAmountSum)} tone="gold"
               sub="sum of all Amount fields" />
-            <Stat label="Import Batches" value={String(batches.length)} />
+            <Stat label="Import Batches" value={String(batches.length)} tone="slate" />
           </div>
 
-          {/* Dedup warning if data already exists */}
           {stats.recordCount > 0 && (
-            <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800">
+            <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-800">
               <strong>⚠ Deduplication note:</strong> If you imported data before April 2026,
-              some line-items with the same price in the same invoice may have been lost
-              (old hash bug). To get accurate totals: click <em>Clear database</em> then
-              re-import all your source files. After re-import, the Raw Amount Sum should
-              exactly match the sum of the <code>Amount</code> column in your Excel files.
+              some line-items with the same price may have been lost. To get accurate totals:
+              click <em>Clear database</em> then re-import all your source files.
             </div>
           )}
 
@@ -326,7 +331,7 @@ export default function AdminImportPage() {
             <button
               onClick={runValidation}
               disabled={validating || stats.recordCount === 0}
-              className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-40 transition-colors"
+              className="flex items-center gap-2 px-3 py-1.5 text-xs font-semibold bg-navy-900 text-gold-400 rounded-lg hover:bg-navy-800 disabled:opacity-40 transition-all shadow-sm"
             >
               {validating
                 ? <><RefreshCw size={12} className="animate-spin" />Running…</>
@@ -334,10 +339,9 @@ export default function AdminImportPage() {
             </button>
           </div>
 
-          {/* Validation results */}
           {validation !== null && valSummary && (
             <div className="mt-4 space-y-3">
-              <div className={`flex items-center gap-2 p-3 rounded-lg text-sm font-semibold ${
+              <div className={`flex items-center gap-2 p-3 rounded-xl text-sm font-semibold ${
                 valSummary.failed === 0
                   ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
                   : 'bg-red-50 text-red-800 border border-red-200'
@@ -350,8 +354,8 @@ export default function AdminImportPage() {
               </div>
 
               {validation.map((g) => (
-                <div key={g.section} className="border border-slate-100 rounded-lg overflow-hidden">
-                  <p className="px-4 py-2 bg-slate-50 text-xs font-semibold text-slate-600 border-b border-slate-100">
+                <div key={g.section} className="border border-slate-100 rounded-xl overflow-hidden">
+                  <p className="px-4 py-2 bg-navy-50 text-xs font-semibold text-navy-900 border-b border-slate-100">
                     {g.section}
                   </p>
                   <ul className="divide-y divide-slate-50">
@@ -380,8 +384,10 @@ export default function AdminImportPage() {
         onDragLeave={() => setDragging(false)}
         onDrop={(e) => { e.preventDefault(); setDragging(false); upload(e.dataTransfer.files) }}
         onClick={() => inputRef.current?.click()}
-        className={`cursor-pointer flex flex-col items-center justify-center gap-3 border-2 border-dashed rounded-2xl py-14 px-8 transition-colors ${
-          dragging ? 'border-blue-400 bg-blue-50' : 'border-slate-300 bg-white hover:border-blue-400 hover:bg-blue-50'
+        className={`cursor-pointer flex flex-col items-center justify-center gap-3 border-2 border-dashed rounded-3xl py-14 px-8 transition-all ${
+          dragging
+            ? 'border-gold-500 bg-gold-50 shadow-gold-glow scale-[1.01]'
+            : 'border-slate-300 bg-white hover:border-gold-400 hover:bg-gold-50/40'
         }`}
       >
         <input
@@ -393,10 +399,10 @@ export default function AdminImportPage() {
           onChange={(e) => upload(e.target.files)}
         />
         {loading
-          ? <RefreshCw size={36} className="text-blue-500 animate-spin" />
-          : <Upload size={36} className="text-slate-400" />}
+          ? <RefreshCw size={36} className="text-gold-500 animate-spin" />
+          : <Upload size={36} className="text-navy-700" />}
         <div className="text-center">
-          <p className="text-sm font-semibold text-slate-700">
+          <p className="text-sm font-semibold text-navy-900">
             {uploadProgress || (loading ? 'Importing…' : 'Drop CSV / Excel files here')}
           </p>
           <p className="text-xs text-slate-500 mt-1">
@@ -406,12 +412,12 @@ export default function AdminImportPage() {
       </div>
 
       {/* Replace toggle */}
-      <label className="flex items-center gap-2 text-sm text-slate-600 cursor-pointer">
+      <label className="flex items-center gap-2 text-sm text-navy-900 cursor-pointer">
         <input
           type="checkbox"
           checked={replace}
           onChange={(e) => setReplace(e.target.checked)}
-          className="rounded border-slate-300"
+          className="rounded border-slate-300 text-navy-900 focus:ring-gold-400"
         />
         <span>
           <strong>Replace all existing data</strong> with this upload
@@ -421,16 +427,16 @@ export default function AdminImportPage() {
 
       {/* ── Import result ────────────────────────────────────────────────── */}
       {result && (
-        <div className="flex items-start gap-3 p-4 bg-emerald-50 border border-emerald-200 rounded-xl">
+        <div className="flex items-start gap-3 p-4 bg-emerald-50 border border-emerald-200 rounded-3xl shadow-card">
           <CheckCircle2 size={20} className="text-emerald-600 mt-0.5 shrink-0" />
           <div className="text-sm">
             <p className="font-semibold text-emerald-800">Import successful</p>
-            <p className="text-emerald-700 mt-1">
+            <p className="text-emerald-700 mt-1 font-num">
               Inserted <strong>{result.inserted.toLocaleString()}</strong> new records ·{' '}
               {result.skipped.toLocaleString()} duplicates skipped
             </p>
             {result.batches.map((b, i) => (
-              <p key={i} className="text-emerald-600 text-xs mt-0.5">
+              <p key={i} className="text-emerald-600 text-xs mt-0.5 font-num">
                 {b.filename}: +{b.inserted.toLocaleString()} ({b.skipped.toLocaleString()} skipped)
               </p>
             ))}
@@ -439,7 +445,7 @@ export default function AdminImportPage() {
       )}
 
       {error && (
-        <div className="flex items-start gap-3 p-4 bg-red-50 border border-red-200 rounded-xl">
+        <div className="flex items-start gap-3 p-4 bg-red-50 border border-red-200 rounded-3xl shadow-card">
           <AlertTriangle size={20} className="text-red-500 mt-0.5 shrink-0" />
           <div className="text-sm">
             <p className="font-semibold text-red-800">Import failed</p>
@@ -449,178 +455,124 @@ export default function AdminImportPage() {
       )}
 
       {/* ── Shareable URLs ───────────────────────────────────────────────── */}
-      <section className="bg-blue-50 border border-blue-200 rounded-xl p-5 space-y-3">
-        <h2 className="text-sm font-bold text-blue-800">Shareable URLs</h2>
+      <section className="bg-gradient-to-br from-navy-50 via-white to-gold-50/30 border border-navy-100 rounded-3xl p-5 space-y-3 shadow-card">
+        <h2 className="text-sm font-bold text-navy-900 flex items-center gap-2">
+          <span className="inline-block w-1 h-4 bg-gold-500 rounded-full" />
+          Shareable URLs
+        </h2>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <div className="bg-white rounded-lg border border-blue-100 p-3">
+          <div className="bg-white rounded-xl border border-navy-100 p-3 hover-lift">
             <p className="text-xs font-semibold text-emerald-700 mb-1">👁 Viewer (share freely)</p>
-            <code className="text-xs text-slate-700 font-mono break-all">
+            <code className="text-xs text-navy-900 font-mono break-all bg-slate-50 block px-2 py-1 rounded">
               {origin}/
             </code>
             <p className="text-[11px] text-slate-500 mt-1.5">
-              Main dashboard — read-only, no login required. Share this URL with anyone who needs to view the data.
+              Main dashboard — read-only, no login required.
             </p>
           </div>
-          <div className="bg-white rounded-lg border border-blue-100 p-3">
-            <p className="text-xs font-semibold text-amber-700 mb-1">🔒 Admin (keep private)</p>
-            <code className="text-xs text-slate-700 font-mono break-all">
+          <div className="bg-white rounded-xl border border-navy-100 p-3 hover-lift">
+            <p className="text-xs font-semibold text-gold-700 mb-1">🔒 Admin (keep private)</p>
+            <code className="text-xs text-navy-900 font-mono break-all bg-slate-50 block px-2 py-1 rounded">
               {origin}/admin/import
             </code>
             <p className="text-[11px] text-slate-500 mt-1.5">
-              This page — upload and manage data files. Do not share with viewers.
+              This page — upload and manage data files.
             </p>
           </div>
         </div>
-        <p className="text-[11px] text-blue-700">
-          <strong>Deploy on Vercel:</strong> push to{' '}
-          <a href="https://vercel.com" target="_blank" rel="noreferrer" className="underline">vercel.com</a>{' '}
-          (free tier). Viewer URL = <code>https://&lt;project&gt;.vercel.app/</code> · Admin URL ={' '}
-          <code>https://&lt;project&gt;.vercel.app/admin/import</code>.
-          Data lives in <code>data/records.ndjson</code> — for production use a persistent volume or Postgres.
-        </p>
       </section>
 
       {/* ── Import history ───────────────────────────────────────────────── */}
-      <section className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-        <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-slate-800">Import history</h2>
+      <section className="bg-white rounded-3xl border border-slate-200 shadow-card overflow-hidden hover-lift">
+        <div className="px-5 py-4 bg-gradient-to-r from-navy-900 via-navy-800 to-navy-700 flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-white flex items-center gap-2">
+            <span className="inline-block w-1 h-4 bg-gold-500 rounded-full" />
+            Import history
+            {batches.length > 0 && (
+              <span className="ml-1 px-2 py-0.5 rounded-full bg-navy-800/60 text-[10px] font-num text-gold-300 border border-navy-600">
+                {batches.length}
+              </span>
+            )}
+          </h2>
           {batches.length > 0 && (
             <button
               onClick={handleClear}
-              className="flex items-center gap-1 text-xs text-red-500 hover:text-red-700"
+              className="flex items-center gap-1 text-xs font-semibold text-red-300 hover:text-red-200 hover:bg-red-500/10 px-2 py-1 rounded-lg transition-colors"
             >
               <Trash2 size={12} />
-              Clear database
+              Clear all
             </button>
           )}
         </div>
         {batches.length === 0 ? (
           <p className="p-6 text-sm text-slate-400 text-center">No imports yet.</p>
         ) : (
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="bg-slate-50 border-b border-slate-100 text-xs text-slate-500">
-                <th className="px-4 py-2 text-left font-semibold">File</th>
-                <th className="px-4 py-2 text-right font-semibold">Records</th>
-                <th className="px-4 py-2 text-right font-semibold">Imported at</th>
-              </tr>
-            </thead>
-            <tbody>
-              {[...batches].reverse().map((b) => (
-                <tr key={b.id} className="border-b border-slate-50">
-                  <td className="px-4 py-2 text-slate-800 text-xs flex items-center gap-2">
-                    <FileText size={12} className="text-slate-400" />
-                    {b.filename}
-                  </td>
-                  <td className="px-4 py-2 text-right tabular-nums text-xs text-slate-600">
-                    {b.recordCount.toLocaleString()}
-                  </td>
-                  <td className="px-4 py-2 text-right tabular-nums text-xs text-slate-500">
-                    {new Date(b.importedAt).toLocaleString()}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <ul className="divide-y divide-slate-100">
+            {[...batches].reverse().map((b) => {
+              const isDeleting = deletingId === b.id
+              return (
+                <li
+                  key={b.id}
+                  className={`group flex items-center gap-3 px-5 py-3 hover:bg-navy-50/40 transition-colors ${
+                    isDeleting ? 'opacity-50 pointer-events-none' : ''
+                  }`}
+                >
+                  <span className="inline-flex w-9 h-9 rounded-xl bg-gradient-to-br from-gold-100 to-gold-50 border border-gold-200/60 items-center justify-center shrink-0">
+                    <FileText size={14} className="text-gold-700" />
+                  </span>
+
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs font-semibold text-navy-900 truncate">{b.filename}</p>
+                    <p className="text-[11px] text-slate-500 mt-0.5 font-num">
+                      {new Date(b.importedAt).toLocaleString()}
+                    </p>
+                  </div>
+
+                  <div className="text-right shrink-0">
+                    <p className="text-sm font-bold text-navy-900 tabular-nums font-num">
+                      {b.recordCount.toLocaleString()}
+                    </p>
+                    <p className="text-[10px] text-slate-400 uppercase tracking-wider">records</p>
+                  </div>
+
+                  <button
+                    onClick={() => handleDeleteBatch(b)}
+                    disabled={isDeleting}
+                    className="ml-2 inline-flex items-center justify-center w-8 h-8 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 border border-transparent hover:border-red-200 transition-all opacity-0 group-hover:opacity-100 focus:opacity-100"
+                    title="ลบไฟล์นี้ออกจากฐานข้อมูล"
+                    aria-label={`Delete batch ${b.filename}`}
+                  >
+                    {isDeleting
+                      ? <RefreshCw size={14} className="animate-spin" />
+                      : <Trash2 size={14} />}
+                  </button>
+                </li>
+              )
+            })}
+          </ul>
         )}
-      </section>
-
-      {/* ── Deploy to Vercel ─────────────────────────────────────────────── */}
-      <section className="bg-white rounded-xl border border-slate-200 shadow-sm p-5 space-y-4">
-        <div className="flex items-center gap-2">
-          <span className="text-lg">🚀</span>
-          <h2 className="text-sm font-bold text-slate-800">Share with Others — Deploy to Vercel</h2>
-        </div>
-        <p className="text-xs text-slate-500">
-          ทำตาม 5 ขั้นตอนนี้ คนอื่นจะเข้าดู dashboard นี้ได้จาก URL ของคุณโดยไม่ต้อง import ข้อมูลเอง
-        </p>
-
-        <ol className="space-y-3 text-sm">
-          {/* Step 1 */}
-          <li className="flex gap-3">
-            <span className="shrink-0 w-6 h-6 rounded-full bg-blue-100 text-blue-700 text-xs font-bold flex items-center justify-center">1</span>
-            <div>
-              <p className="font-medium text-slate-700">Push โค้ดขึ้น GitHub</p>
-              <code className="block mt-1 bg-slate-100 rounded px-3 py-2 text-xs text-slate-600 font-mono whitespace-pre">
-{`cd sales-dashboard
-git init
-git add -A
-git commit -m "initial"
-git remote add origin https://github.com/<your-user>/<repo>.git
-git push -u origin main`}
-              </code>
-              <p className="text-xs text-slate-400 mt-1">ไฟล์ใน <code>data/</code> จะถูก .gitignore ไว้อยู่แล้ว ปลอดภัย</p>
-            </div>
-          </li>
-
-          {/* Step 2 */}
-          <li className="flex gap-3">
-            <span className="shrink-0 w-6 h-6 rounded-full bg-blue-100 text-blue-700 text-xs font-bold flex items-center justify-center">2</span>
-            <div>
-              <p className="font-medium text-slate-700">Import project บน Vercel</p>
-              <p className="text-xs text-slate-500 mt-1">
-                ไปที่{' '}
-                <a href="https://vercel.com/new" target="_blank" rel="noopener noreferrer"
-                   className="text-blue-600 underline">vercel.com/new</a>
-                {' '}→ เลือก GitHub repo → คลิก <strong>Deploy</strong> (ไม่ต้องแก้ settings อะไร)
-              </p>
-            </div>
-          </li>
-
-          {/* Step 3 */}
-          <li className="flex gap-3">
-            <span className="shrink-0 w-6 h-6 rounded-full bg-blue-100 text-blue-700 text-xs font-bold flex items-center justify-center">3</span>
-            <div>
-              <p className="font-medium text-slate-700">สร้าง Blob Store แล้วเชื่อมกับ project</p>
-              <p className="text-xs text-slate-500 mt-1">
-                Vercel Dashboard → project → <strong>Storage</strong> tab → <strong>Create Database</strong> → เลือก <strong>Blob</strong> → Connect to project
-              </p>
-              <p className="text-xs text-slate-400 mt-1">
-                Vercel จะ inject <code>BLOB_READ_WRITE_TOKEN</code> ให้อัตโนมัติ — ไม่ต้องก็อปวาง
-              </p>
-            </div>
-          </li>
-
-          {/* Step 4 */}
-          <li className="flex gap-3">
-            <span className="shrink-0 w-6 h-6 rounded-full bg-blue-100 text-blue-700 text-xs font-bold flex items-center justify-center">4</span>
-            <div>
-              <p className="font-medium text-slate-700">Redeploy แล้ว Import ข้อมูลผ่านหน้านี้</p>
-              <p className="text-xs text-slate-500 mt-1">
-                หลัง Connect Blob → คลิก <strong>Redeploy</strong> → เปิด <code>/admin/import</code> บน URL ของ Vercel → Upload ไฟล์ CSV ตามปกติ ข้อมูลจะบันทึกใน Blob (cloud) แทน local
-              </p>
-            </div>
-          </li>
-
-          {/* Step 5 */}
-          <li className="flex gap-3">
-            <span className="shrink-0 w-6 h-6 rounded-full bg-green-100 text-green-700 text-xs font-bold flex items-center justify-center">5</span>
-            <div>
-              <p className="font-medium text-slate-700">แชร์ URL ให้คนอื่น</p>
-              <p className="text-xs text-slate-500 mt-1">
-                URL หน้าหลัก <code>https://xxx.vercel.app/</code> → ดูได้เลย ไม่ต้อง login<br />
-                หน้า Admin <code>/admin/import</code> → สำหรับคนที่ต้อง upload ข้อมูล (แนะนำให้เพิ่ม password ถ้าต้องการ)
-              </p>
-            </div>
-          </li>
-        </ol>
-
-        <div className="mt-2 p-3 bg-green-50 border border-green-200 rounded-lg text-xs text-green-800">
-          <strong>✅ Free tier ใช้ได้:</strong> Vercel Hobby (ฟรี) รองรับ Blob storage สูงสุด 500 MB
-          ซึ่งรองรับข้อมูลหลาย million records ได้สบาย
-        </div>
       </section>
 
     </main>
   )
 }
 
-function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
+function Stat({ label, value, sub, tone = 'navy' }: {
+  label: string; value: string; sub?: string
+  tone?: 'navy' | 'gold' | 'slate'
+}) {
+  const tones = {
+    navy:  { bg: 'bg-gradient-to-br from-navy-50 to-white',  text: 'text-navy-900',  strip: 'bg-gradient-to-b from-navy-600 to-navy-900' },
+    gold:  { bg: 'bg-gradient-to-br from-gold-50 to-white',  text: 'text-gold-800',  strip: 'bg-gradient-to-b from-gold-400 to-gold-600' },
+    slate: { bg: 'bg-gradient-to-br from-slate-50 to-white', text: 'text-slate-800', strip: 'bg-gradient-to-b from-slate-300 to-slate-500' },
+  }
+  const t = tones[tone]
   return (
-    <div className="bg-slate-50 rounded-lg p-3">
-      <p className="text-xs text-slate-500 font-medium">{label}</p>
-      <p className="text-lg font-bold text-slate-800 mt-0.5">{value}</p>
-      {sub && <p className="text-[10px] text-slate-400 mt-0.5">{sub}</p>}
+    <div className={`group relative rounded-2xl p-3.5 overflow-hidden border border-slate-200/60 transition-all hover:border-slate-300 hover:shadow-md ${t.bg}`}>
+      <span className={`absolute left-0 top-2 bottom-2 w-1 rounded-full ${t.strip}`} />
+      <p className="text-[10px] text-slate-500 font-semibold uppercase tracking-[0.12em] pl-2">{label}</p>
+      <p className={`text-xl font-bold mt-1 pl-2 font-num tracking-tight ${t.text}`}>{value}</p>
+      {sub && <p className="text-[10px] text-slate-400 mt-1 pl-2">{sub}</p>}
     </div>
   )
 }

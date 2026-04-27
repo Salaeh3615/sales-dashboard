@@ -3,14 +3,17 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
+    "dev": "node --max-old-space-size=8192 ./node_modules/next/dist/bin/next dev",
+    "build": "node --max-old-space-size=8192 ./node_modules/next/dist/bin/next build",
+    "start": "node --max-old-space-size=8192 ./node_modules/next/dist/bin/next start",
+    "migrate": "node scripts/migrate-ndjson-to-sqlite.mjs",
     "lint": "next lint"
   },
   "dependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@vercel/blob": "^2.3.3",
     "@vercel/kv": "^3.0.0",
+    "better-sqlite3": "^12.9.0",
     "clsx": "^2.1.1",
     "lucide-react": "^0.435.0",
     "next": "^14.2.5",
