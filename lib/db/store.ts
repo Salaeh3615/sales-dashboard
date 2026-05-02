@@ -46,6 +46,15 @@ function ensureDir() {
 
 let _db: DatabaseType.Database | null = null
 
+/**
+ * Public accessor for the singleton DB connection. Used by `lib/db/queries.ts`
+ * (SQL-side aggregations) so we don't have to re-open the DB or re-run schema
+ * setup in every consumer.
+ */
+export function getDb(): DatabaseType.Database {
+  return db()
+}
+
 function db(): DatabaseType.Database {
   if (_db) return _db
   ensureDir()
